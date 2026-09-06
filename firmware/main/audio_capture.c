@@ -73,16 +73,18 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
     if (slot == AUDIO_CAPTURE_SLOT_LEFT)  slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     if (slot == AUDIO_CAPTURE_SLOT_RIGHT) slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
 
-    /* MCLK for the ES8311 comes from GPIO 16, driven either by the LEDC
-     * hack in cmd_es_init / cmd_voice_record (transitional) or by the I²S
-     * peripheral itself when we let it. Route it via I²S so a single
-     * subsystem owns the whole codec clock tree — the LEDC path can then
-     * be dropped from the REPL command in a follow-up. */
+    /* MCLK for the ES8311 stays on GPIO 16 driven by the LEDC hack in
+     * cmd_es_init / cmd_voice_record. Not routed through I²S here on
+     * purpose: letting I²S rebind GPIO 16 after the codec is already
+     * initialised glitches MCLK during the hand-over and the codec's
+     * ADC decimator can lose lock. Give the pin to LEDC (which has been
+     * driving MCLK since before es8311_init ran) and only borrow
+     * BCLK/LRCK/DIN. */
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(16000),
         .slot_cfg = slot_cfg,
         .gpio_cfg = {
-            .mclk = ES8311_I2S_MCLK,
+            .mclk = I2S_GPIO_UNUSED,
             .bclk = bclk_pin,
             .ws   = ws_pin,
             .dout = I2S_GPIO_UNUSED,        /* RX-only path */
@@ -104,8 +106,8 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
         s_rx_chan = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "capture started (16 kHz mono s16le, MCLK=GPIO%d BCLK=GPIO%d "
-                  "WS=GPIO%d DIN=GPIO%d slot=%s)",
+    ESP_LOGI(TAG, "capture started (16 kHz mono s16le, MCLK=LEDC@GPIO%d "
+                  "BCLK=GPIO%d WS=GPIO%d DIN=GPIO%d slot=%s)",
              ES8311_I2S_MCLK, bclk_pin, ws_pin, din_pin,
              slot == AUDIO_CAPTURE_SLOT_LEFT ? "L" :
              slot == AUDIO_CAPTURE_SLOT_RIGHT ? "R" : "LR");

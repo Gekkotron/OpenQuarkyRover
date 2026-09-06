@@ -2047,6 +2047,12 @@ static int cmd_voice_record(int argc, char **argv)
         printf("voice-record: audio_capture_start -> %s\n", esp_err_to_name(r));
         vQueueDelete(q); free(buf); return 1;
     }
+    /* Second dump — AFTER I²S RX is running. If I²S start-up silently
+     * disturbs the codec (bad clock hand-over, GPIO conflict on MCLK,
+     * etc.) the register values will differ from the first dump. */
+    vTaskDelay(pdMS_TO_TICKS(20));
+    printf("voice-record: ES8311 state AFTER audio_capture_start_ex:\n");
+    es8311_dump();
     /* Digital MEMS mic settles within a few LRCK edges. Drop the first
      * few frames (128 ms) — INMP441-family mics need ~50 ms after WS
      * starts before valid samples appear. */
