@@ -21,7 +21,9 @@
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/i2s_pdm.h"    /* PDM RX probe for the on-board digital MEMS mic */
 #include "led_strip.h"
+#include <math.h>
 
 #include "pins.h"
 #include "i2c_bitbang.h"
@@ -2359,6 +2361,187 @@ static int cmd_voice_inject_test(int argc, char **argv)
     return 0;
 }
 
+/* --- PDM digital-mic probe -------------------------------------------
+ *
+ * Hypothesis (2026-09): the on-board mic is not routed through the
+ * ES8311 codec but is a standalone PDM MEMS device (candidates:
+ * ST MP34DT05TR-A, MP34DT06JTR). If so, its CLK and DAT pins land
+ * directly on ESP32-S3 GPIOs — which the S3's I2S peripheral can
+ * read natively via `i2s_channel_init_pdm_rx_mode`. These commands
+ * brute-force that space without touching the codec path.
+ *
+ * Free user GPIOs on this board (from pins.h): 4, 5, 6, 8, 9, 10, 11,
+ * 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 38, 39, 40, 41, 42. Excludes
+ * confirmed assignments (0 servo, 1/2 I2C, 7 button ADC, 47 PA_EN,
+ * 48 LED), flash/PSRAM (26..37), and UART0 (43/44).
+ */
+
+static const int PDM_CANDIDATES[] = {
+    4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 38, 39, 40, 41, 42,
+};
+#define PDM_CANDIDATES_N (sizeof(PDM_CANDIDATES) / sizeof(PDM_CANDIDATES[0]))
+
+#define PDM_SAMPLE_RATE_HZ 16000
+
+/* Read `ms` milliseconds of PDM mono audio on (clk, dat) and fill out
+ * n_samples / rms / peak2peak. Fully allocates + tears down the I2S
+ * channel each call so the caller can iterate pin pairs freely.
+ * Returns ESP_OK on success; on failure the out-params are undefined. */
+static esp_err_t pdm_capture(int clk_gpio, int dat_gpio, int ms,
+                             int *out_n, double *out_rms, int *out_p2p)
+{
+    if (ms <= 0) ms = 100;
+
+    i2s_chan_handle_t rx = NULL;
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    esp_err_t e = i2s_new_channel(&chan_cfg, NULL, &rx);
+    if (e != ESP_OK) return e;
+
+    i2s_pdm_rx_config_t pdm_cfg = {
+        .clk_cfg  = I2S_PDM_RX_CLK_DEFAULT_CONFIG(PDM_SAMPLE_RATE_HZ),
+        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                   I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .clk = (gpio_num_t)clk_gpio,
+            .din = (gpio_num_t)dat_gpio,
+            .invert_flags = { .clk_inv = false },
+        },
+    };
+    e = i2s_channel_init_pdm_rx_mode(rx, &pdm_cfg);
+    if (e != ESP_OK) { i2s_del_channel(rx); return e; }
+
+    e = i2s_channel_enable(rx);
+    if (e != ESP_OK) { i2s_del_channel(rx); return e; }
+
+    int nsamples = (PDM_SAMPLE_RATE_HZ / 1000) * ms;
+    size_t nbytes = nsamples * sizeof(int16_t);
+    int16_t *buf = (int16_t *)malloc(nbytes);
+    if (!buf) {
+        i2s_channel_disable(rx);
+        i2s_del_channel(rx);
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t bytes_read = 0;
+    e = i2s_channel_read(rx, buf, nbytes, &bytes_read, pdMS_TO_TICKS(ms + 500));
+
+    i2s_channel_disable(rx);
+    i2s_del_channel(rx);
+
+    if (e != ESP_OK) { free(buf); return e; }
+
+    int n = (int)(bytes_read / sizeof(int16_t));
+    int16_t vmin = INT16_MAX, vmax = INT16_MIN;
+    int64_t sum_sq = 0;
+    for (int i = 0; i < n; i++) {
+        int16_t s = buf[i];
+        if (s < vmin) vmin = s;
+        if (s > vmax) vmax = s;
+        sum_sq += (int32_t)s * (int32_t)s;
+    }
+    free(buf);
+
+    *out_n   = n;
+    *out_rms = n > 0 ? sqrt((double)sum_sq / (double)n) : 0.0;
+    *out_p2p = (int)vmax - (int)vmin;
+    return ESP_OK;
+}
+
+static int cmd_pdm_probe(int argc, char **argv)
+{
+    if (argc < 3) {
+        printf("usage: pdm-probe <clk_gpio> <dat_gpio> [ms]\n");
+        return 1;
+    }
+    int clk = atoi(argv[1]);
+    int dat = atoi(argv[2]);
+    int ms  = (argc >= 4) ? atoi(argv[3]) : 200;
+
+    int n = 0, p2p = 0;
+    double rms = 0.0;
+    esp_err_t e = pdm_capture(clk, dat, ms, &n, &rms, &p2p);
+    if (e != ESP_OK) {
+        printf("clk=%d dat=%d FAILED (%s)\n", clk, dat, esp_err_to_name(e));
+        return 1;
+    }
+    printf("clk=%d dat=%d n=%d rms=%.1f peak2peak=%d\n", clk, dat, n, rms, p2p);
+    return 0;
+}
+
+static int cmd_pdm_watch(int argc, char **argv)
+{
+    if (argc < 3) {
+        printf("usage: pdm-watch <clk_gpio> <dat_gpio> [seconds]\n"
+               "       prints RMS/peak every 100 ms — snap fingers to see it spike\n");
+        return 1;
+    }
+    int clk = atoi(argv[1]);
+    int dat = atoi(argv[2]);
+    int secs = (argc >= 4) ? atoi(argv[3]) : 5;
+    if (secs <= 0) secs = 5;
+
+    int chunks = secs * 10;
+    for (int i = 0; i < chunks; i++) {
+        int n = 0, p2p = 0;
+        double rms = 0.0;
+        esp_err_t e = pdm_capture(clk, dat, 100, &n, &rms, &p2p);
+        if (e != ESP_OK) {
+            printf("[%d] FAILED (%s)\n", i, esp_err_to_name(e));
+            return 1;
+        }
+        printf("[%3d] rms=%7.1f peak2peak=%5d\n", i, rms, p2p);
+    }
+    return 0;
+}
+
+static int cmd_pdm_scan(int argc, char **argv)
+{
+    int ms = (argc >= 2) ? atoi(argv[1]) : 100;
+    if (ms < 20) ms = 20;
+
+    /* If a specific CLK is given, restrict scan to that CLK vs all
+     * candidate DAT pins. Otherwise brute-force every ordered pair
+     * (~PDM_CANDIDATES_N * (PDM_CANDIDATES_N-1) probes). */
+    int fixed_clk = (argc >= 3) ? atoi(argv[2]) : -1;
+
+    printf("pdm-scan: %d candidate pins, %d ms per probe\n",
+           (int)PDM_CANDIDATES_N, ms);
+    printf("      make continuous noise near the mic while this runs;\n");
+    printf("      the true (CLK, DAT) pair will show a large peak2peak.\n");
+
+    int probes = 0, hits = 0;
+    for (size_t i = 0; i < PDM_CANDIDATES_N; i++) {
+        int clk = PDM_CANDIDATES[i];
+        if (fixed_clk >= 0 && clk != fixed_clk) continue;
+
+        for (size_t j = 0; j < PDM_CANDIDATES_N; j++) {
+            if (i == j) continue;
+            int dat = PDM_CANDIDATES[j];
+
+            int n = 0, p2p = 0;
+            double rms = 0.0;
+            esp_err_t e = pdm_capture(clk, dat, ms, &n, &rms, &p2p);
+            probes++;
+
+            if (e != ESP_OK) {
+                /* Skip silently — many pin pairs will refuse to init on
+                 * strapping / input-only combinations; not a hit signal. */
+                continue;
+            }
+            /* Baseline noise on a floating DAT pin is typically flat
+             * (~0 p2p). Anything above a few hundred is worth a look. */
+            if (p2p >= 200) {
+                printf("  HIT clk=%2d dat=%2d rms=%7.1f peak2peak=%5d\n",
+                       clk, dat, rms, p2p);
+                hits++;
+            }
+        }
+    }
+    printf("pdm-scan done: %d probes, %d hits\n", probes, hits);
+    return 0;
+}
+
 static void register_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
@@ -2401,6 +2584,9 @@ static void register_commands(void)
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
         { .command = "voice-inject-test", .help = "M3 diagnostic: publish a synthetic voice command through the bus: voice-inject-test <id 1..5>", .func = cmd_voice_inject_test },
         { .command = "mic-enable-scan",   .help = "M3 diagnostic: sweep 21 candidate GPIOs, drive each HIGH, and look for the pin that ungates the mic (~18 s)", .func = cmd_mic_enable_scan },
+        { .command = "pdm-probe",     .help = "M3 mic: test one PDM CLK/DAT pair (PDM hypothesis for MP34DT05/06): pdm-probe <clk> <dat> [ms]",         .func = cmd_pdm_probe },
+        { .command = "pdm-watch",     .help = "M3 mic: live PDM RMS every 100 ms — snap fingers to see spike: pdm-watch <clk> <dat> [seconds]",         .func = cmd_pdm_watch },
+        { .command = "pdm-scan",      .help = "M3 mic: brute-force PDM CLK/DAT pairs across free GPIOs: pdm-scan [ms] [fixed_clk]",                     .func = cmd_pdm_scan },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); ++i) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
