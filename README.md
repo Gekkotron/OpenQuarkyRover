@@ -3,6 +3,9 @@
 An open-source alternate firmware for the **STEMpedia Quarky Intellio** — an
 ESP32-S3–based AI/AR/IoT learning board (LEGO- and Arduino-compatible).
 
+<img width="748" height="388" alt="image" src="https://github.com/user-attachments/assets/3629f10a-b540-4afc-8e88-2e8b3e7287ac" />
+
+
 **Long-term goals:**
 
 - On-device voice control (wake word + command spotting via ESP-SR)
