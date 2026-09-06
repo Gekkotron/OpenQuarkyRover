@@ -141,3 +141,23 @@
 #define ES8311_I2S_DIN      10    /* ADF Korvo-2 v3 board profile     */
 
 #define ES8311_I2C_ADDR     0x18  /* 7-bit; datasheet §Register 0xFD returns 0x83 */
+
+/* --- Digital I²S MEMS microphone (M3 Task 4) ------------------------- */
+/*
+ * The on-board mic is an omnidirectional digital MEMS microphone
+ * (INMP441-family) that talks I²S DIRECTLY to the ESP32-S3 over its own
+ * three-wire bus — completely independent of the ES8311 codec above,
+ * which is on the DAC / speaker side. The mic needs no MCLK, no analog
+ * routing, and no codec init: just I²S RX in master mode.
+ *
+ * Slot format on the wire: 24-bit PCM in a 32-bit slot, MSB-first,
+ * one channel (typical INMP441). Our i2s_std config reads that as
+ * 16-bit mono by asking the driver to sample the top 16 bits of a
+ * 32-bit slot — matches ESP-SR's 16 kHz mono s16le expectation
+ * without a resample.
+ *
+ * Provenance: hardware notes from the vendor (Quarky Intellio spec).
+ */
+#define MIC_I2S_SCK         40    /* BCLK from ESP32 (I²S master) */
+#define MIC_I2S_WS          41    /* WS / LRCLK from ESP32 */
+#define MIC_I2S_SD          42    /* SD / DIN — mic drives this */

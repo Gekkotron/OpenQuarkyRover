@@ -26,6 +26,9 @@
 #include "pins.h"
 #include "i2c_bitbang.h"
 #include "es8311.h"
+#include "audio_capture.h"
+#include "freertos/queue.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "M1";
 
@@ -1916,6 +1919,271 @@ static int cmd_es_init(int argc, char **argv)
     return (r == ESP_OK) ? 0 : 1;
 }
 
+/* --- voice-record: capture N seconds of PCM, dump as hex over UART ------
+ *
+ * REPL flow: audio_capture_start (I²S RX drives MCLK on GPIO 16) →
+ * es8311_init (codec sees the I²S-provided MCLK) → drain the queue into
+ * a PSRAM buffer for the whole capture window → stop → hex-dump the
+ * buffer between BEGIN/END markers.
+ *
+ * Why hex and not real-time raw: UART is 115200 baud (~11.5 kB/s),
+ * raw PCM is 32 kB/s — real-time streaming drops ~2/3 of samples. The
+ * PSRAM-buffer + slow-dump path loses zero samples; the dump takes
+ * about 6× the capture duration but the audio is intact.
+ *
+ * Extract on host from monitor.sh's ANSI-stripped log:
+ *
+ *   sed -n '/voice-record BEGIN/,/voice-record END/p' logs/latest.clean.log \
+ *     | grep -Ex '[0-9a-f]{64}' | xxd -r -p > /tmp/mic.pcm
+ *   sox -t raw -r 16000 -e signed -b 16 -c 1 /tmp/mic.pcm /tmp/mic.wav
+ *   afplay /tmp/mic.wav
+ */
+static int cmd_voice_record(int argc, char **argv)
+{
+    if (argc != 2) { printf("usage: voice-record <sec>  (1..10)\n"); return 1; }
+    int sec = atoi(argv[1]);
+    if (sec < 1 || sec > 10) { printf("range: 1..10\n"); return 1; }
+
+    const size_t frames_total = ((size_t)sec * 16000) / AUDIO_CAPTURE_FRAME_SAMPLES;
+    const size_t bytes_total  = frames_total * AUDIO_CAPTURE_FRAME_BYTES;
+
+    /* 96 KB for 3 s fits comfortably in internal SRAM. Once Task 8 enables
+     * PSRAM (CONFIG_SPIRAM=y for the ESP-SR models), this can grow to any
+     * ceiling the user wants without touching the SRAM heap. */
+    int16_t *buf = malloc(bytes_total);
+    if (!buf) { printf("voice-record: alloc failed (%zu B)\n", bytes_total); return 1; }
+
+    QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
+    if (!q) { free(buf); printf("voice-record: queue alloc failed\n"); return 1; }
+
+    /* Digital MEMS mics have an L/R pin that hardwires which I²S slot the
+     * mic drives. When the pin is tied high the mic drives RIGHT; low, it
+     * drives LEFT. Empty slot reads back as all-1s (0xFFFF as int16) —
+     * so a solid stream of -1 samples means we're on the wrong slot.
+     * The Quarky Intellio mic ties L/R high → we read RIGHT. */
+    audio_capture_config_t cfg = { .din_gpio = MIC_I2S_SD,
+                                   .slot     = AUDIO_CAPTURE_SLOT_RIGHT };
+    esp_err_t r = audio_capture_start_ex(q, &cfg);
+    if (r != ESP_OK) {
+        printf("voice-record: audio_capture_start -> %s\n", esp_err_to_name(r));
+        vQueueDelete(q); free(buf); return 1;
+    }
+    /* Digital MEMS mic settles within a few LRCK edges. Drop the first
+     * few frames (128 ms) — INMP441-family mics need ~50 ms after WS
+     * starts before valid samples appear. */
+    int16_t discard[AUDIO_CAPTURE_FRAME_SAMPLES];
+    for (int i = 0; i < 4; i++) {
+        (void)xQueueReceive(q, discard, pdMS_TO_TICKS(200));
+    }
+
+    printf("voice-record: capturing %d s (%zu frames, %zu bytes)...\n",
+           sec, frames_total, bytes_total);
+
+    size_t got = 0;
+    for (size_t i = 0; i < frames_total; i++) {
+        if (xQueueReceive(q, &buf[i * AUDIO_CAPTURE_FRAME_SAMPLES], pdMS_TO_TICKS(500)) != pdTRUE) break;
+        got++;
+    }
+    audio_capture_stop();
+    vQueueDelete(q);
+
+    uint32_t dropped = audio_capture_dropped_frames();
+    /* Signal stats: min, max, mean absolute value, and count of non-zero
+     * samples. All zeros means the ADC path (or DIN pin) is wrong; a
+     * tiny non-zero range means the mic is quiet but wired right. */
+    int16_t smin = INT16_MAX, smax = INT16_MIN;
+    int64_t sabs = 0;
+    size_t  n_nz = 0;
+    size_t  total_samples = got * AUDIO_CAPTURE_FRAME_SAMPLES;
+    for (size_t i = 0; i < total_samples; i++) {
+        int16_t s = buf[i];
+        if (s < smin) smin = s;
+        if (s > smax) smax = s;
+        sabs += (s < 0) ? -s : s;
+        if (s) n_nz++;
+    }
+    int mean_abs = total_samples ? (int)(sabs / (int64_t)total_samples) : 0;
+    printf("voice-record: captured %zu/%zu frames, dropped=%lu, "
+           "min=%d max=%d mean|s|=%d nonzero=%zu/%zu\n",
+           got, frames_total, (unsigned long)dropped,
+           smin, smax, mean_abs, n_nz, total_samples);
+
+    /* Hex dump. 32 bytes per line → 64 hex chars, exactly greppable. */
+    printf("--- voice-record BEGIN sec=%d samples=%zu bytes=%zu ---\n",
+           sec, got * AUDIO_CAPTURE_FRAME_SAMPLES, got * AUDIO_CAPTURE_FRAME_BYTES);
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t n = got * AUDIO_CAPTURE_FRAME_BYTES;
+    for (size_t i = 0; i < n; i += 32) {
+        size_t chunk = (n - i < 32) ? (n - i) : 32;
+        for (size_t j = 0; j < chunk; j++) printf("%02x", p[i + j]);
+        printf("\n");
+        /* Feed the UART TX FIFO some slack so this doesn't wedge log output. */
+        if ((i & 0x3FF) == 0) vTaskDelay(1);
+    }
+    printf("--- voice-record END ---\n");
+
+    free(buf);
+    return 0;
+}
+
+/* voice-scan: sweep I²S DIN candidate pins × slot (LEFT/RIGHT) and report
+ * max|sample| for each. First combo with a non-trivial max wins the DIN
+ * pin question. Runs es8311_init once (MCLK is briefly gapped between
+ * iterations when I²S is torn down / re-set-up, but the codec re-syncs
+ * on the next MCLK cycle without needing a full re-init).
+ *
+ * Runtime: ~22 candidate pins × 2 slots × ~400 ms ≈ 18 s. */
+static const int VOICE_DIN_CAND[] = {
+    4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 21,
+    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 47
+};
+static const size_t VOICE_DIN_CAND_COUNT =
+    sizeof(VOICE_DIN_CAND) / sizeof(VOICE_DIN_CAND[0]);
+
+static int cmd_voice_scan(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+
+    /* No codec init needed — the mic is a digital MEMS on its own I²S bus.
+     * Sweep DIN pin × slot and report max|sample|; the answer is expected
+     * to be DIN=GPIO 42, slot LEFT (INMP441-family default). Kept as a
+     * diagnostic so future board revisions that move the mic can be
+     * re-discovered without a rebuild. */
+    QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
+    if (!q) { printf("voice-scan: queue alloc failed\n"); return 1; }
+
+    printf("--- voice-scan: %zu DIN candidates × 2 slots (BCLK=%d WS=%d) ---\n",
+           VOICE_DIN_CAND_COUNT, MIC_I2S_SCK, MIC_I2S_WS);
+    int best_max = 0;
+    int best_din = -1;
+    audio_capture_slot_t best_slot = AUDIO_CAPTURE_SLOT_LEFT;
+
+    for (int slot_i = 0; slot_i < 2; slot_i++) {
+        audio_capture_slot_t slot = (slot_i == 0)
+            ? AUDIO_CAPTURE_SLOT_LEFT : AUDIO_CAPTURE_SLOT_RIGHT;
+        const char *slot_s = (slot == AUDIO_CAPTURE_SLOT_LEFT) ? "L" : "R";
+
+        for (size_t k = 0; k < VOICE_DIN_CAND_COUNT; k++) {
+            int din = VOICE_DIN_CAND[k];
+            /* Skip pins already claimed by the mic I²S clocks. */
+            if (din == MIC_I2S_SCK || din == MIC_I2S_WS) continue;
+
+            audio_capture_config_t cfg = { .din_gpio = din, .slot = slot };
+            if (audio_capture_start_ex(q, &cfg) != ESP_OK) continue;
+
+            /* Drain queue first (any stale frames) then read 8 fresh. */
+            int16_t frame[AUDIO_CAPTURE_FRAME_SAMPLES];
+            while (xQueueReceive(q, frame, 0) == pdTRUE) { }
+
+            int mx = 0;
+            for (int f = 0; f < 8; f++) {
+                if (xQueueReceive(q, frame, pdMS_TO_TICKS(200)) != pdTRUE) break;
+                for (size_t j = 0; j < AUDIO_CAPTURE_FRAME_SAMPLES; j++) {
+                    int a = frame[j] < 0 ? -frame[j] : frame[j];
+                    if (a > mx) mx = a;
+                }
+            }
+            audio_capture_stop();
+            printf("  DIN=GPIO%-2d slot=%s max|s|=%d\n", din, slot_s, mx);
+            if (mx > best_max) { best_max = mx; best_din = din; best_slot = slot; }
+        }
+    }
+
+    vQueueDelete(q);
+
+    if (best_max == 0) {
+        printf("--- voice-scan: no candidate produced non-zero samples.\n");
+        printf("    ADC path is likely muted at the codec — not a DIN pin issue.\n");
+        return 1;
+    }
+    printf("--- voice-scan: best DIN=GPIO%d slot=%s max|s|=%d\n",
+           best_din, best_slot == AUDIO_CAPTURE_SLOT_LEFT ? "L" : "R", best_max);
+    return 0;
+}
+
+/* mic-perm: try all 6 orderings of GPIOs 40/41/42 as (BCLK, WS, DIN) plus
+ * LEFT/RIGHT slot. Only the correct mapping gets the mic clocked properly,
+ * so exactly one row should report a non-trivial max|sample|. Useful when
+ * the vendor's pin-label naming might have swapped roles. */
+static int cmd_mic_perm(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+
+    QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
+    if (!q) { printf("mic-perm: queue alloc failed\n"); return 1; }
+
+    const int pins[3] = { MIC_I2S_SCK, MIC_I2S_WS, MIC_I2S_SD };
+    /* 3! permutation table */
+    const int perms[6][3] = {
+        {0,1,2}, {0,2,1}, {1,0,2}, {1,2,0}, {2,0,1}, {2,1,0}
+    };
+    int best_max = 0;
+    int best_p   = -1;
+    audio_capture_slot_t best_slot = AUDIO_CAPTURE_SLOT_LEFT;
+
+    printf("--- mic-perm: 6 pin permutations of {GPIO%d, GPIO%d, GPIO%d} × 2 slots ---\n",
+           pins[0], pins[1], pins[2]);
+
+    for (int slot_i = 0; slot_i < 2; slot_i++) {
+        audio_capture_slot_t slot = (slot_i == 0)
+            ? AUDIO_CAPTURE_SLOT_LEFT : AUDIO_CAPTURE_SLOT_RIGHT;
+        const char *slot_s = (slot == AUDIO_CAPTURE_SLOT_LEFT) ? "L" : "R";
+
+        for (int p = 0; p < 6; p++) {
+            int bclk = pins[perms[p][0]];
+            int ws   = pins[perms[p][1]];
+            int din  = pins[perms[p][2]];
+            audio_capture_config_t cfg = {
+                .bclk_gpio = bclk, .ws_gpio = ws, .din_gpio = din, .slot = slot,
+            };
+            if (audio_capture_start_ex(q, &cfg) != ESP_OK) continue;
+
+            int16_t frame[AUDIO_CAPTURE_FRAME_SAMPLES];
+            while (xQueueReceive(q, frame, 0) == pdTRUE) { }
+
+            int mx = 0;
+            int nz = 0;
+            int seen_neg1 = 0;  /* count of exactly 0xFFFF samples */
+            for (int f = 0; f < 12; f++) {
+                if (xQueueReceive(q, frame, pdMS_TO_TICKS(200)) != pdTRUE) break;
+                for (size_t j = 0; j < AUDIO_CAPTURE_FRAME_SAMPLES; j++) {
+                    int a = frame[j] < 0 ? -frame[j] : frame[j];
+                    if (a > mx) mx = a;
+                    if (frame[j]) nz++;
+                    if ((uint16_t)frame[j] == 0xFFFF) seen_neg1++;
+                }
+            }
+            audio_capture_stop();
+            printf("  BCLK=%-2d WS=%-2d DIN=%-2d slot=%s  max|s|=%-5d  nz=%-5d  neg1=%-5d\n",
+                   bclk, ws, din, slot_s, mx, nz, seen_neg1);
+            /* Score by max|s|, ignoring the "all -1s" degenerate case. */
+            if (mx > best_max && seen_neg1 < 100) {
+                best_max = mx; best_p = p; best_slot = slot;
+            }
+        }
+    }
+    vQueueDelete(q);
+
+    if (best_p < 0) {
+        printf("--- mic-perm: no permutation produced real signal.\n");
+        printf("    Mic likely needs a power-enable GPIO (or L/R pin driven).\n");
+        printf("    Check the schematic for a MIC_EN / AUDIO_EN line.\n");
+        return 1;
+    }
+    printf("--- mic-perm: best BCLK=%d WS=%d DIN=%d slot=%s max|s|=%d\n",
+           pins[perms[best_p][0]], pins[perms[best_p][1]], pins[perms[best_p][2]],
+           best_slot == AUDIO_CAPTURE_SLOT_LEFT ? "L" : "R", best_max);
+    return 0;
+}
+
+static int cmd_voice_stats(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    printf("voice-stats: audio_capture dropped_frames=%lu\n",
+           (unsigned long)audio_capture_dropped_frames());
+    return 0;
+}
+
 static void register_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
@@ -1952,6 +2220,10 @@ static void register_commands(void)
         { .command = "bb-tlc-sweep",  .help = "cycle all 8 TLC59108 channels via bit-bang (2 s each) — find which is M1/M2/P1..P4", .func = cmd_bb_tlc_sweep },
         { .command = "es-verify",     .help = "M3 codec check: drive MCLK on ES8311_I2S_MCLK and read product ID (expect 0x83) via bit-bang I2C", .func = cmd_es_verify },
         { .command = "es-init",       .help = "M3 codec: drive MCLK and run the ES8311 register-level init recipe (16 kHz mono ADC path)", .func = cmd_es_init },
+        { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump between BEGIN/END markers: voice-record <sec 1..10>", .func = cmd_voice_record },
+        { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
+        { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
+        { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); ++i) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));

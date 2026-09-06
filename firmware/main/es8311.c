@@ -36,6 +36,7 @@
 #define ES8311_ADC_REG17                0x17   /* ADC digital volume (0xBF = 0 dB) */
 #define ES8311_ADC_REG1B                0x1B
 #define ES8311_ADC_REG1C                0x1C
+#define ES8311_DAC_REG37                0x37   /* DAC ramp rate (unused for ADC path) */
 #define ES8311_GPIO_REG44               0x44
 #define ES8311_GP_REG45                 0x45
 #define ES8311_CHD1_REGFD               0xFD   /* chip ID, expect 0x83 */
@@ -75,71 +76,85 @@ static inline int r(uint8_t reg, uint8_t *out)
 esp_err_t es8311_init(void)
 {
     /* --- Reset ------------------------------------------------------------
-     * REG 0x00: writing 0x1F asserts CSM + digital + clock resets; 0x00
-     * releases all reset bits and leaves the codec powered but idle.
-     * Datasheet §Register 0x00 — the plan test encodes this pair as the
-     * first two writes and it doubles as a "start from a known state"
-     * guarantee across re-inits. */
+     * REG00 = 0x1F asserts every reset bit; = 0x00 releases them. Not
+     * strictly in ADF's init (ADF assumes the chip is fresh out of
+     * power-on reset), but the plan test contract puts this pair first
+     * and it also makes es8311_init idempotent across re-runs. */
     TRY(w(ES8311_RESET_REG00, 0x1F));
     TRY(w(ES8311_RESET_REG00, 0x00));
 
-    /* --- Clock configuration ---------------------------------------------
-     * Target: MCLK = 4.096 MHz (I2S_MCLK_MULTIPLE_256 × 16 kHz), sample
-     * rate 16 kHz, slave mode, MCLK from the dedicated MCLK pin. Values
-     * come from ADF's coeff_div[] row {mclk=4096000, rate=16000}: pre_div
-     * pre_multi adc_div dac_div fs_mode lrck_h lrck_l bclk_div adc_osr
-     * dac_osr = 1 1 1 1 0 0 0xff 4 0x10 0x20. Each REG* below is the
-     * bit-packed form of that row per ADF es8311_config_sample(). */
-    TRY(w(ES8311_CLK_MANAGER_REG02, 0x00));   /* pre_div-1=0, pre_multi=0 → x1 */
-    TRY(w(ES8311_CLK_MANAGER_REG03, 0x10));   /* fs_mode=0, adc_osr=0x10 */
-    TRY(w(ES8311_CLK_MANAGER_REG04, 0x20));   /* dac_osr=0x20 */
-    TRY(w(ES8311_CLK_MANAGER_REG05, 0x00));   /* adc_div-1=0, dac_div-1=0 */
-    TRY(w(ES8311_CLK_MANAGER_REG06, 0x03));   /* bclk_div=4 → (4-1)=3 */
-    TRY(w(ES8311_CLK_MANAGER_REG07, 0x00));   /* lrck_h=0 */
-    TRY(w(ES8311_CLK_MANAGER_REG08, 0xFF));   /* lrck_l=0xff */
+    /* --- Init mirrors ADF es8311_codec_init verbatim -------------------- */
 
-    /* Enable all internal clocks; leave bit 7 = 0 (MCLK from MCLK_PIN). */
-    TRY(w(ES8311_CLK_MANAGER_REG01, 0x3F));
+    /* I²C noise immunity, per ADF: "Due to occasional failures during
+     * the first I²C write with the ES8311 chip, a second write is
+     * performed to ensure reliability." */
+    TRY(w(ES8311_GPIO_REG44, 0x08));
+    TRY(w(ES8311_GPIO_REG44, 0x08));
 
-    /* Slave-mode audio interface: REG00 bit 6 = 0 (default after reset). */
+    /* Clock scheme: enable clocks (REG01), zero prescaler (REG02),
+     * ADC fs-mode+osr baseline (REG03), analog PGA baseline (REG16),
+     * DAC osr baseline (REG04), ADC/DAC divider (REG05). REG02/03/04/05
+     * get their final 16 kHz @ 4.096 MHz values below via the
+     * config_sample recipe. */
+    TRY(w(ES8311_CLK_MANAGER_REG01, 0x30));
+    TRY(w(ES8311_CLK_MANAGER_REG02, 0x00));
+    TRY(w(ES8311_CLK_MANAGER_REG03, 0x10));
+    TRY(w(ES8311_ADC_REG16,         0x24));
+    TRY(w(ES8311_CLK_MANAGER_REG04, 0x10));
+    TRY(w(ES8311_CLK_MANAGER_REG05, 0x00));
 
-    /* --- Serial digital ports --------------------------------------------
-     * 16-bit width on both DAC (REG09) and ADC (REG0A) SDP so the same
-     * driver is future-proof for M4 duplex, and I²S "normal" format
-     * (LJ bit cleared). ADF: es8311_set_bits_per_sample + config_fmt. */
-    TRY(w(ES8311_SDPIN_REG09,  0x0C));
-    TRY(w(ES8311_SDPOUT_REG0A, 0x0C));
-
-    /* --- System register defaults from ADF init --------------------------
-     * These configure charge pump, VMID, reference, etc. Copying ADF's
-     * exact sequence is safer than guessing — the datasheet §"System
-     * Register" section documents each bit but the interactions are
-     * subtle enough that the tested-in-production combo wins. */
+    /* Analog domain defaults (charge pump / VMID / bias). */
     TRY(w(ES8311_SYSTEM_REG0B, 0x00));
     TRY(w(ES8311_SYSTEM_REG0C, 0x00));
     TRY(w(ES8311_SYSTEM_REG10, 0x1F));
     TRY(w(ES8311_SYSTEM_REG11, 0x7F));
+
+    /* CSM power-on — bit 7. Bit 6 = 0 → slave (we're the I²S slave).
+     * Without this the ADC digital output is frozen at zero. */
+    TRY(w(ES8311_RESET_REG00, 0x80));
+
+    /* Enable all internal clocks (REG01 = 0x3F), MCLK from MCLK pin
+     * (bit 7 stays 0), MCLK not inverted (bit 6 stays 0). */
+    TRY(w(ES8311_CLK_MANAGER_REG01, 0x3F));
+
+    /* --- config_sample(16000) equivalent, MCLK = 4.096 MHz --------------
+     * ADF coeff_div row {mclk=4096000, rate=16000}: pre_div=1, pre_multi=1,
+     * adc_div=1, dac_div=1, fs_mode=0, lrck_h=0, lrck_l=0xff, bclk_div=4,
+     * adc_osr=0x10, dac_osr=0x20. Values here are the bit-packed form
+     * ADF's config_sample would produce for that row. */
+    TRY(w(ES8311_CLK_MANAGER_REG02, 0x00));   /* pre_div-1=0 << 5, pre_multi=0 << 3 */
+    TRY(w(ES8311_CLK_MANAGER_REG05, 0x00));   /* adc_div-1=0 << 4, dac_div-1=0 */
+    TRY(w(ES8311_CLK_MANAGER_REG03, 0x10));   /* fs_mode=0 << 6, adc_osr=0x10 */
+    TRY(w(ES8311_CLK_MANAGER_REG04, 0x20));   /* dac_osr=0x20 */
+    TRY(w(ES8311_CLK_MANAGER_REG07, 0x00));   /* lrck_h=0 */
+    TRY(w(ES8311_CLK_MANAGER_REG08, 0xFF));   /* lrck_l=0xff */
+    TRY(w(ES8311_CLK_MANAGER_REG06, 0x03));   /* bclk_div=4 → (4-1) */
+
+    /* Serial data ports: 16-bit width on both, I²S normal format. */
+    TRY(w(ES8311_SDPIN_REG09,  0x0C));
+    TRY(w(ES8311_SDPOUT_REG0A, 0x0C));
+
+    /* Post-config housekeeping. */
     TRY(w(ES8311_SYSTEM_REG13, 0x10));
     TRY(w(ES8311_ADC_REG1B,    0x0A));
     TRY(w(ES8311_ADC_REG1C,    0x6A));
 
-    /* Default mic PGA to 0 dB. Writes REG16 exactly once. */
-    (void)es8311_set_mic_gain_db(0);
+    /* --- ADC start (folded from ADF es8311_start(ES_MODULE_ADC)) -------
+     * Order matches ADF exactly: SDP unmute, ADC volume, per-block enables,
+     * PGA gain / DMIC deselect (analog mic), system power-up ramp, DAC
+     * ramp (harmless for ADC-only), GP0 clear, internal-reference route. */
+    TRY(w(ES8311_SDPIN_REG09,  0x4C));       /* DAC SDP: bit 6 = 1 → mute (unused) */
+    TRY(w(ES8311_SDPOUT_REG0A, 0x0C));       /* ADC SDP: bit 6 = 0 → unmute */
 
-    /* --- ADC path power-up (folded from ADF es8311_start) ---------------
-     * REG17 = 0xBF: ADC digital volume 0 dB, unmuted (bit 0 = 1 — the
-     * plan test checks that bit specifically as "ADC enabled"). REG0E /
-     * REG12 / REG14 configure PGA/DMIC selection; REG0D powers the
-     * system rails; REG15 sets ADC ramp; REG44 = 0x58 selects the
-     * internal reference (ADCL + DACR). */
-    TRY(w(ES8311_ADC_REG17,   0xBF));
-    TRY(w(ES8311_SYSTEM_REG0E, 0x02));
+    TRY(w(ES8311_ADC_REG17,    0xBF));       /* ADC digital volume 0 dB, unmuted */
+    TRY(w(ES8311_SYSTEM_REG0E, 0x02));       /* enable ADC block */
     TRY(w(ES8311_SYSTEM_REG12, 0x00));
-    TRY(w(ES8311_SYSTEM_REG14, 0x1A));   /* analog PGA + mic input */
-    TRY(w(ES8311_SYSTEM_REG0D, 0x01));   /* system power up */
-    TRY(w(ES8311_ADC_REG15,    0x40));   /* ADC ramp rate */
+    TRY(w(ES8311_SYSTEM_REG14, 0x1A));       /* DMIC=0 (analog), PGA gain select */
+    TRY(w(ES8311_SYSTEM_REG0D, 0x01));       /* system power up */
+    TRY(w(ES8311_ADC_REG15,    0x40));       /* ADC ramp rate */
+    TRY(w(ES8311_DAC_REG37,    0x08));       /* DAC ramp (ADF sets even for ADC-only) */
     TRY(w(ES8311_GP_REG45,     0x00));
-    TRY(w(ES8311_GPIO_REG44,   0x58));   /* internal reference: ADCL + DACR */
+    TRY(w(ES8311_GPIO_REG44,   0x58));       /* internal reference: ADCL + DACR */
 
     return ESP_OK;
 }
