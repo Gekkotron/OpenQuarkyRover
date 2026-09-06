@@ -2,5 +2,6 @@
 # `make clean` regenerates them; `make` (re-)fetches Unity from GitHub.
 es8311_init_test
 command_bus_test
+led_indicator_test
 *.dSYM/
 unity/

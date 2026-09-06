@@ -15,7 +15,7 @@ CFLAGS   := -std=c11 -Wall -Wextra -g -O0 -I. -I../../main -Iunity
 LDFLAGS  :=
 
 UNITY_SRC := unity/unity.c
-TESTS     := es8311_init_test command_bus_test
+TESTS     := es8311_init_test command_bus_test led_indicator_test
 
 all: $(TESTS) run
 
@@ -30,6 +30,9 @@ es8311_init_test: es8311_init_test.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 command_bus_test: command_bus_test.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+led_indicator_test: led_indicator_test.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 run: $(TESTS)

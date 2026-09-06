@@ -28,6 +28,7 @@
 #include "es8311.h"
 #include "audio_capture.h"
 #include "command_bus.h"
+#include "led_indicator.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
 
@@ -118,11 +119,15 @@ static void led_init(int gpio)
     s_led_pin = gpio;
 }
 
-static void led_set(uint8_t r, uint8_t g, uint8_t b)
+/* Non-static + int return so led_indicator.c can extern-call this from
+ * the tick task. Returns 1 on success (led_strip driver invoked) or 0
+ * if the strip handle isn't initialised (LED disabled / early boot). */
+int led_set(uint8_t r, uint8_t g, uint8_t b)
 {
-    if (!s_led) return;
+    if (!s_led) return 0;
     led_strip_set_pixel(s_led, 0, r, g, b);
     led_strip_refresh(s_led);
+    return 1;
 }
 
 /* --- I2C bus + PCA9685 driver (expansion board is I2C-controlled) --- */
@@ -429,16 +434,31 @@ static int cmd_led(int argc, char **argv)
 {
     if (argc < 4) { printf("usage: led <r 0-255> <g 0-255> <b 0-255>\n"); return 1; }
     int r = atoi(argv[1]), g = atoi(argv[2]), b = atoi(argv[3]);
-    led_set((uint8_t)r, (uint8_t)g, (uint8_t)b);
-    printf("led (GPIO %d) = (%d,%d,%d)\n", s_led_pin, r, g, b);
+    /* Route through the bus so led_indicator's arbitration owns the pixel —
+     * calling led_set directly races the FSM tick and gets overwritten on
+     * the next 30 ms tick, defeating the point of a set. */
+    command_t c = { .id = CMD_LED_RGB, .source = SRC_REPL,
+                    .as.led_rgb = { .r = (uint8_t)r, .g = (uint8_t)g, .b = (uint8_t)b } };
+    esp_err_t rc = command_bus_publish(&c);
+    if (rc != ESP_OK) {
+        printf("led: publish failed: %s\n", esp_err_to_name(rc));
+        return 1;
+    }
+    printf("led (GPIO %d) = (%d,%d,%d) via bus\n", s_led_pin, r, g, b);
     return 0;
 }
 
 static int cmd_led_off(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    led_set(0, 0, 0);
-    printf("led off\n");
+    command_t c = { .id = CMD_LED_RGB, .source = SRC_REPL,
+                    .as.led_rgb = { 0, 0, 0 } };
+    esp_err_t rc = command_bus_publish(&c);
+    if (rc != ESP_OK) {
+        printf("led-off: publish failed: %s\n", esp_err_to_name(rc));
+        return 1;
+    }
+    printf("led off (via bus)\n");
     return 0;
 }
 
@@ -2318,6 +2338,11 @@ void app_main(void)
      * migrated action verbs (Task 7) plug in via strong-symbol overrides
      * over command_bus.c's WEAK stubs. */
     ESP_ERROR_CHECK(command_bus_start());
+
+    /* LED indicator FSM (Task 6). Owns the WS2812B from here on — REPL
+     * `led` publishes CMD_LED_RGB through the bus, and voice states
+     * (LISTENING / OK / NACK) preempt user RGB with automatic restore. */
+    ESP_ERROR_CHECK(led_indicator_start());
 
     register_commands();
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
