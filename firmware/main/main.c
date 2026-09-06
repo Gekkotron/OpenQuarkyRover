@@ -1948,9 +1948,23 @@ static int cmd_es_init(int argc, char **argv)
  */
 static int cmd_voice_record(int argc, char **argv)
 {
-    if (argc != 2) { printf("usage: voice-record <sec>  (1..10)\n"); return 1; }
+    if (argc < 2 || argc > 3) {
+        printf("usage: voice-record <sec 1..10> [slot=L|R]  (default: R)\n");
+        return 1;
+    }
     int sec = atoi(argv[1]);
     if (sec < 1 || sec > 10) { printf("range: 1..10\n"); return 1; }
+
+    /* Slot: default R (empirical — LEFT gave all zeros on this board, so
+     * the ES8311 stock init routes ADC data to the RIGHT slot here even
+     * though REG44=0x58 nominally selects internal ADCL). Override with
+     * `voice-record <sec> L` to test LEFT again. */
+    audio_capture_slot_t slot = AUDIO_CAPTURE_SLOT_RIGHT;
+    if (argc == 3) {
+        if      (argv[2][0] == 'L' || argv[2][0] == 'l') slot = AUDIO_CAPTURE_SLOT_LEFT;
+        else if (argv[2][0] == 'R' || argv[2][0] == 'r') slot = AUDIO_CAPTURE_SLOT_RIGHT;
+        else { printf("slot must be L or R\n"); return 1; }
+    }
 
     const size_t frames_total = ((size_t)sec * 16000) / AUDIO_CAPTURE_FRAME_SAMPLES;
     const size_t bytes_total  = frames_total * AUDIO_CAPTURE_FRAME_BYTES;
@@ -1995,10 +2009,9 @@ static int cmd_voice_record(int argc, char **argv)
     /* Let any codec GPO settle before starting the I²S RX path. */
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* ES8311 stock ADC-only config routes internal ADCL to the L slot
-     * (REG44=0x58). Read LEFT; RIGHT will be silent by design here. Pass
-     * .din_gpio=0 so audio_capture uses its ES8311_I2S_DIN default. */
-    audio_capture_config_t cfg = { .slot = AUDIO_CAPTURE_SLOT_LEFT };
+    /* Slot selected above from argv (default RIGHT, override L via arg).
+     * Pass .din_gpio=0 so audio_capture uses its ES8311_I2S_DIN default. */
+    audio_capture_config_t cfg = { .slot = slot };
     esp_err_t r = audio_capture_start_ex(q, &cfg);
     if (r != ESP_OK) {
         printf("voice-record: audio_capture_start -> %s\n", esp_err_to_name(r));
@@ -2624,7 +2637,7 @@ static void register_commands(void)
         { .command = "bb-tlc-sweep",  .help = "cycle all 8 TLC59108 channels via bit-bang (2 s each) — find which is M1/M2/P1..P4", .func = cmd_bb_tlc_sweep },
         { .command = "es-verify",     .help = "M3 codec check: drive MCLK on ES8311_I2S_MCLK and read product ID (expect 0x83) via bit-bang I2C", .func = cmd_es_verify },
         { .command = "es-init",       .help = "M3 codec: drive MCLK and run the ES8311 register-level init recipe (16 kHz mono ADC path)", .func = cmd_es_init },
-        { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump between BEGIN/END markers: voice-record <sec 1..10>", .func = cmd_voice_record },
+        { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump: voice-record <sec 1..10> [slot=L|R] (default R)", .func = cmd_voice_record },
         { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
