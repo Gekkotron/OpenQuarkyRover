@@ -2374,11 +2374,10 @@ static const int PDM_CANDIDATES[] = {
  * BCLK = sample_rate * 32.
  *
  * MP34DT05TR-A / MP34DT06JTR (and most modern PDM MEMS mics) need PDM
- * CLK >= 1.2 MHz to leave sleep mode. sample_rate = 64000 gives BCLK =
- * 2.048 MHz — comfortably inside the 1.2–3.25 MHz valid range. Using the
- * ESP-IDF default of 16000 gave BCLK = 512 kHz which kept the mic
- * asleep and made every pin pair look identical (all rail-hugging DC). */
-#define PDM_SAMPLE_RATE_HZ 64000
+ * CLK >= 1.2 MHz to leave sleep mode. sample_rate = 48000 gives BCLK =
+ * 1.536 MHz — comfortably inside the 1.2–3.25 MHz valid range while
+ * staying at a standard sample rate the S3 PDM RX handles cleanly. */
+#define PDM_SAMPLE_RATE_HZ 48000
 
 /* Result of a single PDM capture. `rms` is the raw magnitude; `ac_rms` is
  * the magnitude after subtracting `mean` (DC offset). Real audio has
@@ -2552,6 +2551,10 @@ static int cmd_pdm_scan(int argc, char **argv)
         int clk = PDM_CANDIDATES[i];
         if (fixed_clk >= 0 && clk != fixed_clk) continue;
 
+        int clk_hits = 0, clk_errors = 0;
+        printf("clk=%2d: ", clk);
+        fflush(stdout);
+
         for (size_t j = 0; j < PDM_CANDIDATES_N; j++) {
             if (i == j) continue;
             int dat = PDM_CANDIDATES[j];
@@ -2560,12 +2563,14 @@ static int cmd_pdm_scan(int argc, char **argv)
             esp_err_t e = pdm_capture(clk, dat, ms, &st);
             probes++;
 
-            if (e != ESP_OK) continue;
+            if (e != ESP_OK) { clk_errors++; continue; }
 
             if (st.ac_rms >= PDM_HIT_AC_RMS_MIN) {
-                printf("  HIT clk=%2d dat=%2d mean=%6.0f ac_rms=%6.0f p2p=%5d\n",
+                printf("\n  HIT clk=%2d dat=%2d mean=%6.0f ac_rms=%6.0f p2p=%5d",
                        clk, dat, st.mean, st.ac_rms, st.p2p);
+                fflush(stdout);
                 hits++;
+                clk_hits++;
                 if (st.ac_rms > best_ac) {
                     best_ac  = st.ac_rms;
                     best_clk = clk;
@@ -2573,6 +2578,8 @@ static int cmd_pdm_scan(int argc, char **argv)
                 }
             }
         }
+        printf(" [%d hits, %d init errors]\n", clk_hits, clk_errors);
+        fflush(stdout);
     }
     printf("pdm-scan done: %d probes, %d hits\n", probes, hits);
     if (best_clk >= 0) {
