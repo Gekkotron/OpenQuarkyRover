@@ -1946,12 +1946,12 @@ static int cmd_es_init(int argc, char **argv)
  *   sox -t raw -r 16000 -e signed -b 16 -c 1 /tmp/mic.pcm /tmp/mic.wav
  *   afplay /tmp/mic.wav
  */
-static int cmd_es_dump(int argc, char **argv)
+/* Bootstrap for standalone ES8311 REPL commands: LEDC drives MCLK on
+ * GPIO 16 (needed for the codec to ACK I²C) and bring up the bit-bang
+ * I²C bus on the codec's SDA/SCL. Idempotent — safe to call more than
+ * once; ledc_timer_config / ledc_channel_config just re-apply. */
+static void es_repl_bootstrap(void)
 {
-    (void)argc; (void)argv;
-    /* Make sure MCLK is running and the bit-bang bus is up. es-init
-     * already sets these; running es-dump standalone still needs them
-     * so the codec ACKs I²C reads. */
     ledc_timer_config_t mclk_timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_1_BIT,
@@ -1970,6 +1970,55 @@ static int cmd_es_dump(int argc, char **argv)
     };
     (void)ledc_channel_config(&mclk_ch);
     bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
+}
+
+static int cmd_es_peek(int argc, char **argv)
+{
+    if (argc != 2) { printf("usage: es-peek <reg_hex>\n"); return 1; }
+    unsigned reg = (unsigned)strtoul(argv[1], NULL, 16);
+    if (reg > 0xFF) { printf("reg out of range\n"); return 1; }
+    es_repl_bootstrap();
+    uint8_t v = 0;
+    if (!bb_read_reg(ES8311_I2C_SDA, ES8311_I2C_SCL,
+                     ES8311_I2C_ADDR, (uint8_t)reg, &v)) {
+        printf("es-peek: I2C read failed (reg 0x%02X)\n", (unsigned)reg);
+        return 1;
+    }
+    printf("REG 0x%02X = 0x%02X\n", (unsigned)reg, v);
+    return 0;
+}
+
+static int cmd_es_poke(int argc, char **argv)
+{
+    if (argc != 3) { printf("usage: es-poke <reg_hex> <val_hex>\n"); return 1; }
+    unsigned reg = (unsigned)strtoul(argv[1], NULL, 16);
+    unsigned val = (unsigned)strtoul(argv[2], NULL, 16);
+    if (reg > 0xFF || val > 0xFF) { printf("reg or val out of range\n"); return 1; }
+    es_repl_bootstrap();
+    if (!bb_write_reg(ES8311_I2C_SDA, ES8311_I2C_SCL,
+                      ES8311_I2C_ADDR, (uint8_t)reg, (uint8_t)val)) {
+        printf("es-poke: I2C write failed (reg 0x%02X = 0x%02X)\n",
+               (unsigned)reg, (unsigned)val);
+        return 1;
+    }
+    /* Read-back verification. Some registers are R/O or self-updating,
+     * so a mismatch here isn't necessarily an error — just report. */
+    uint8_t rb = 0;
+    if (bb_read_reg(ES8311_I2C_SDA, ES8311_I2C_SCL,
+                    ES8311_I2C_ADDR, (uint8_t)reg, &rb)) {
+        printf("REG 0x%02X <- 0x%02X (readback 0x%02X)\n",
+               (unsigned)reg, (unsigned)val, rb);
+    } else {
+        printf("REG 0x%02X <- 0x%02X (readback failed)\n",
+               (unsigned)reg, (unsigned)val);
+    }
+    return 0;
+}
+
+static int cmd_es_dump(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    es_repl_bootstrap();
     return es8311_dump() == ESP_OK ? 0 : 1;
 }
 
@@ -2674,6 +2723,8 @@ static void register_commands(void)
         { .command = "es-verify",     .help = "M3 codec check: drive MCLK on ES8311_I2S_MCLK and read product ID (expect 0x83) via bit-bang I2C", .func = cmd_es_verify },
         { .command = "es-init",       .help = "M3 codec: drive MCLK and run the ES8311 register-level init recipe (16 kHz mono ADC path)", .func = cmd_es_init },
         { .command = "es-dump",       .help = "M3 codec: hex-dump the ES8311's key control registers over bit-bang I2C", .func = cmd_es_dump },
+        { .command = "es-peek",       .help = "M3 codec: read one ES8311 register: es-peek <reg_hex>", .func = cmd_es_peek },
+        { .command = "es-poke",       .help = "M3 codec: write one ES8311 register: es-poke <reg_hex> <val_hex>", .func = cmd_es_poke },
         { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump: voice-record <sec 1..10> [slot=L|R] (default R)", .func = cmd_voice_record },
         { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
