@@ -1,0 +1,10 @@
+# ESP-IDF build artifacts
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig.old
+
+# Session logs (Claude Code / RTK)
+logs/
+
+# macOS
+.DS_Store

@@ -1,0 +1,23 @@
+# Target and flash — matches the ESP32-S3-WROOM-1-N16R8 module on the
+# Quarky Intellio (verified via `esptool chip-id` + `esptool image-info`
+# on the stock firmware).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+
+# Console on UART0 — the board has a USB-to-serial bridge (device shows
+# up as /dev/cu.usbserial-*), NOT native USB-JTAG. Default UART console
+# is what `idf.py monitor` expects here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Give app_main a comfortable stack. The REPL runs in its own task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# PSRAM: NOT enabled in this M1 smoke test. The board is N16R8 (8 MB
+# octal PSRAM) — turn on in M2+ when the web UI + framebuffers need it.
