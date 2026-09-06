@@ -6,6 +6,7 @@
 
 #include "es8311.h"
 #include "pins.h"
+#include <stdio.h>       /* es8311_dump */
 #ifndef ES8311_MOCK_TRANSPORT
 #include "i2c_bitbang.h"
 #endif
@@ -192,4 +193,30 @@ esp_err_t es8311_stop(void)
     uint8_t v = 0;
     if (!r(ES8311_SDPOUT_REG0A, &v)) return ESP_FAIL;
     return w(ES8311_SDPOUT_REG0A, (uint8_t)(v | 0x40)) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t es8311_dump(void)
+{
+    /* Read the codec's key control registers so a caller can see what the
+     * ADC / analog / SDP / clock path is actually set to right now. Any
+     * read failure prints "??" for that register but doesn't stop the
+     * dump — we want to see as much state as possible when triaging. */
+    static const uint8_t regs[] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x1B, 0x1C, 0x37, 0x44, 0x45,
+        0xFD, 0xFE,
+    };
+    printf("es-dump: ES8311 @ 0x%02x (bit-bang I2C on SDA=%d SCL=%d)\n",
+           ES8311_I2C_ADDR, ES8311_I2C_SDA, ES8311_I2C_SCL);
+    for (size_t i = 0; i < sizeof(regs); i++) {
+        uint8_t v = 0;
+        if (r(regs[i], &v)) {
+            printf("  REG 0x%02X = 0x%02X\n", regs[i], v);
+        } else {
+            printf("  REG 0x%02X = ??  (I2C read failed)\n", regs[i]);
+        }
+    }
+    return ESP_OK;
 }

@@ -60,3 +60,12 @@ esp_err_t es8311_start(void);
  * a full re-init.
  */
 esp_err_t es8311_stop(void);
+
+/*
+ * Diagnostic: read back the codec's control registers over bit-bang I²C
+ * and printf a hex dump. Non-modifying (reads only) — safe to call any
+ * time after `es8311_init`. Used by the `es-dump` REPL command and
+ * inline by `voice-record` to check what the codec is actually set to
+ * when the ADC path comes back silent.
+ */
+esp_err_t es8311_dump(void);

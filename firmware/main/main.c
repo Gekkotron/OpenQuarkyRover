@@ -1946,6 +1946,33 @@ static int cmd_es_init(int argc, char **argv)
  *   sox -t raw -r 16000 -e signed -b 16 -c 1 /tmp/mic.pcm /tmp/mic.wav
  *   afplay /tmp/mic.wav
  */
+static int cmd_es_dump(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    /* Make sure MCLK is running and the bit-bang bus is up. es-init
+     * already sets these; running es-dump standalone still needs them
+     * so the codec ACKs I²C reads. */
+    ledc_timer_config_t mclk_timer = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_1_BIT,
+        .timer_num       = LEDC_TIMER_2,
+        .freq_hz         = 4000000,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    (void)ledc_timer_config(&mclk_timer);
+    ledc_channel_config_t mclk_ch = {
+        .gpio_num   = ES8311_I2S_MCLK,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_3,
+        .timer_sel  = LEDC_TIMER_2,
+        .duty       = 1,
+        .hpoint     = 0,
+    };
+    (void)ledc_channel_config(&mclk_ch);
+    bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
+    return es8311_dump() == ESP_OK ? 0 : 1;
+}
+
 static int cmd_voice_record(int argc, char **argv)
 {
     if (argc < 2 || argc > 3) {
@@ -2004,8 +2031,11 @@ static int cmd_voice_record(int argc, char **argv)
     (void)ledc_channel_config(&mclk_ch);
     bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
     esp_err_t codec_r = es8311_init();
-    printf("voice-record: es8311_init -> %s (mic-enable side-effect hypothesis)\n",
-           esp_err_to_name(codec_r));
+    printf("voice-record: es8311_init -> %s\n", esp_err_to_name(codec_r));
+    /* Dump the codec's control registers right after init so an all-zero
+     * / all-0xFFFF capture can be diagnosed without a separate REPL step.
+     * Compare against ADF's es8311_codec_init expected values. */
+    es8311_dump();
     /* Let any codec GPO settle before starting the I²S RX path. */
     vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -2637,6 +2667,7 @@ static void register_commands(void)
         { .command = "bb-tlc-sweep",  .help = "cycle all 8 TLC59108 channels via bit-bang (2 s each) — find which is M1/M2/P1..P4", .func = cmd_bb_tlc_sweep },
         { .command = "es-verify",     .help = "M3 codec check: drive MCLK on ES8311_I2S_MCLK and read product ID (expect 0x83) via bit-bang I2C", .func = cmd_es_verify },
         { .command = "es-init",       .help = "M3 codec: drive MCLK and run the ES8311 register-level init recipe (16 kHz mono ADC path)", .func = cmd_es_init },
+        { .command = "es-dump",       .help = "M3 codec: hex-dump the ES8311's key control registers over bit-bang I2C", .func = cmd_es_dump },
         { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump: voice-record <sec 1..10> [slot=L|R] (default R)", .func = cmd_voice_record },
         { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
