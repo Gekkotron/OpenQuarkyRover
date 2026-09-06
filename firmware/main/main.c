@@ -25,6 +25,7 @@
 
 #include "pins.h"
 #include "i2c_bitbang.h"
+#include "es8311.h"
 
 static const char *TAG = "M1";
 
@@ -1860,20 +1861,59 @@ static int cmd_es_verify(int argc, char **argv)
     bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
 
     uint8_t id = 0, ver = 0;
-    bool r1 = bb_read_reg(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, 0xFD, &id);
-    bool r2 = bb_read_reg(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, 0xFE, &ver);
+    esp_err_t rr = es8311_read_id(&id, &ver);
 
     ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, 0);
 
-    if (!r1 || !r2) {
-        printf("es-verify: I2C read failed on SDA=%d SCL=%d (r1=%d r2=%d)\n",
-               ES8311_I2C_SDA, ES8311_I2C_SCL, (int)r1, (int)r2);
+    if (rr != ESP_OK) {
+        printf("es-verify: es8311_read_id failed: %s\n", esp_err_to_name(rr));
         return 1;
     }
     printf("es-verify: ES8311 id=0x%02x (expect 0x83), version=0x%02x on "
            "MCLK=GPIO%d SDA=GPIO%d SCL=GPIO%d\n",
            id, ver, ES8311_I2S_MCLK, ES8311_I2C_SDA, ES8311_I2C_SCL);
     return (id == 0x83) ? 0 : 1;
+}
+
+/* Full codec init: drives MCLK, then runs the ES8311 register recipe
+ * (reset, clock config for 16 kHz mono ADC path, mic gain 0 dB, ADC
+ * power-up). Prerequisite for `voice-record` / `voice-start` in later
+ * tasks. Leaves MCLK running (must be driven for the codec to stay
+ * responsive after init). */
+static int cmd_es_init(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+
+    ledc_timer_config_t timer_cfg = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_1_BIT,
+        .timer_num       = LEDC_TIMER_2,
+        .freq_hz         = 4000000,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    if (ledc_timer_config(&timer_cfg) != ESP_OK) {
+        printf("es-init: LEDC timer_config failed\n");
+        return 1;
+    }
+    ledc_channel_config_t ch_cfg = {
+        .gpio_num   = ES8311_I2S_MCLK,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_3,
+        .timer_sel  = LEDC_TIMER_2,
+        .duty       = 1,
+        .hpoint     = 0,
+    };
+    if (ledc_channel_config(&ch_cfg) != ESP_OK) {
+        printf("es-init: LEDC channel_config on GPIO%d failed\n", ES8311_I2S_MCLK);
+        return 1;
+    }
+
+    bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
+
+    esp_err_t r = es8311_init();
+    printf("es-init: es8311_init -> %s (MCLK GPIO%d still running)\n",
+           esp_err_to_name(r), ES8311_I2S_MCLK);
+    return (r == ESP_OK) ? 0 : 1;
 }
 
 static void register_commands(void)
@@ -1911,6 +1951,7 @@ static void register_commands(void)
         { .command = "bb-tlc-set",    .help = "drive one TLC59108 channel via bit-bang: bb-tlc-set <ch 0-7> <pct 0-100>", .func = cmd_bb_tlc_set },
         { .command = "bb-tlc-sweep",  .help = "cycle all 8 TLC59108 channels via bit-bang (2 s each) — find which is M1/M2/P1..P4", .func = cmd_bb_tlc_sweep },
         { .command = "es-verify",     .help = "M3 codec check: drive MCLK on ES8311_I2S_MCLK and read product ID (expect 0x83) via bit-bang I2C", .func = cmd_es_verify },
+        { .command = "es-init",       .help = "M3 codec: drive MCLK and run the ES8311 register-level init recipe (16 kHz mono ADC path)", .func = cmd_es_init },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); ++i) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
