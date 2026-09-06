@@ -17,6 +17,16 @@ under our own firmware: **`motor <L> <R>` at the REPL spins both wheels
 via the TLC59108 → DRV8833 chain** — see [Motor drive](#motor-drive-m1)
 below. Foundation drivers (RGB LED, servo, buttons) are on the same REPL.
 
+**Peripheral status:**
+
+- [x] RGB LED
+- [x] Motor M1
+- [x] Motor M2
+- [x] Servo
+- [x] Buttons (L / R)
+- [ ] Microphone
+- [ ] Camera
+
 ---
 
 ## Hardware
