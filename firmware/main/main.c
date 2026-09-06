@@ -27,6 +27,7 @@
 #include "i2c_bitbang.h"
 #include "es8311.h"
 #include "audio_capture.h"
+#include "command_bus.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
 
@@ -453,7 +454,12 @@ static int cmd_led_pin(int argc, char **argv)
 /* Forward decls: motor drive is implemented via bit-bang further down.
  * The ESP-IDF i2c_master peripheral doesn't ACK on this board (see the
  * cmd_bb_scan comment), so we drive the TLC59108 via bit-bang instead. */
-static bool bb_motor_set(int m1_signed, int m2_signed);
+/* Non-static + `int` return so command_bus.c can extern-call this from the
+ * dispatcher. Return values keep the old bool semantics (1 = success,
+ * 0 = failure) so REPL callers of the form `if (!bb_motor_set(...))` still
+ * work unchanged. Task 7 revisits this if we want an ESP-IDF-style
+ * error code out of it. */
+int bb_motor_set(int m1_signed, int m2_signed);
 static bool s_bb_ready = false;
 
 static int cmd_motor(int argc, char **argv)
@@ -1744,7 +1750,7 @@ static uint8_t ledout0_for_motors(int m1_signed, int m2_signed)
     return r;
 }
 
-static bool bb_motor_set(int m1_signed, int m2_signed)
+int bb_motor_set(int m1_signed, int m2_signed)
 {
     if (m1_signed < -100) m1_signed = -100;
     if (m1_signed > 100)  m1_signed = 100;
@@ -1764,16 +1770,16 @@ static bool bb_motor_set(int m1_signed, int m2_signed)
      * (opposite-direction) channels get the same value but are LDR=OFF,
      * so their PWM register is ignored. */
     if (!bb_write_reg(sda, scl, TLC59108_ADDR,
-                      TLC59108_PWM0 + MOTOR_M2_PLUS,  m2_pwm)) return false;
+                      TLC59108_PWM0 + MOTOR_M2_PLUS,  m2_pwm)) return 0;
     if (!bb_write_reg(sda, scl, TLC59108_ADDR,
-                      TLC59108_PWM0 + MOTOR_M2_MINUS, m2_pwm)) return false;
+                      TLC59108_PWM0 + MOTOR_M2_MINUS, m2_pwm)) return 0;
     if (!bb_write_reg(sda, scl, TLC59108_ADDR,
-                      TLC59108_PWM0 + MOTOR_M1_PLUS,  m1_pwm)) return false;
+                      TLC59108_PWM0 + MOTOR_M1_PLUS,  m1_pwm)) return 0;
     if (!bb_write_reg(sda, scl, TLC59108_ADDR,
-                      TLC59108_PWM0 + MOTOR_M1_MINUS, m1_pwm)) return false;
+                      TLC59108_PWM0 + MOTOR_M1_MINUS, m1_pwm)) return 0;
 
     return bb_write_reg(sda, scl, TLC59108_ADDR, TLC59108_LEDOUT0,
-                        ledout0_for_motors(m1_signed, m2_signed));
+                        ledout0_for_motors(m1_signed, m2_signed)) ? 1 : 0;
 }
 
 static int cmd_bb_scan(int argc, char **argv)
@@ -2184,6 +2190,35 @@ static int cmd_voice_stats(int argc, char **argv)
     return 0;
 }
 
+/* Publish a synthetic voice command through the bus (bypasses the audio
+ * stack). Verifies the whole dispatcher path lands on the motor helper
+ * before Task 10 wires MultiNet-EN into the bus for real. Same command
+ * IDs as the eventual voice vocabulary: 1=forward 2=backward 3=left
+ * 4=right 5=stop 6=faster 7=slower. Speed defaults live at the top of
+ * voice_pipeline.c once Task 10 lands; here they're inlined for the
+ * diagnostic. */
+static int cmd_voice_inject_test(int argc, char **argv)
+{
+    if (argc != 2) { printf("usage: voice-inject-test <cmd_id 1..7>\n"); return 1; }
+    int id = atoi(argv[1]);
+    command_t c = { .source = SRC_VOICE };
+    switch (id) {
+    case 1: c.id = CMD_MOTOR; c.as.motor = (typeof(c.as.motor)){ +60, +60 }; break;
+    case 2: c.id = CMD_MOTOR; c.as.motor = (typeof(c.as.motor)){ -60, -60 }; break;
+    case 3: c.id = CMD_MOTOR; c.as.motor = (typeof(c.as.motor)){ -60, +60 }; break;
+    case 4: c.id = CMD_MOTOR; c.as.motor = (typeof(c.as.motor)){ +60, -60 }; break;
+    case 5: c.id = CMD_STOP;  break;
+    default: printf("voice-inject-test: id 1..5 only (faster/slower need voice_pipeline.c)\n"); return 1;
+    }
+    esp_err_t r = command_bus_publish(&c);
+    if (r != ESP_OK) {
+        printf("voice-inject-test: publish failed: %s\n", esp_err_to_name(r));
+        return 1;
+    }
+    printf("voice-inject-test: published cmd id=%d\n", id);
+    return 0;
+}
+
 static void register_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
@@ -2224,6 +2259,7 @@ static void register_commands(void)
         { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
+        { .command = "voice-inject-test", .help = "M3 diagnostic: publish a synthetic voice command through the bus: voice-inject-test <id 1..5>", .func = cmd_voice_inject_test },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); ++i) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
@@ -2276,6 +2312,12 @@ void app_main(void)
 
     esp_console_dev_uart_config_t uart_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&uart_config, &repl_config, &repl));
+
+    /* Command bus + dispatcher (Task 5). Voice and REPL both publish here;
+     * dispatcher runs on core 0 prio 5. led_indicator (Task 6) and
+     * migrated action verbs (Task 7) plug in via strong-symbol overrides
+     * over command_bus.c's WEAK stubs. */
+    ESP_ERROR_CHECK(command_bus_start());
 
     register_commands();
     ESP_ERROR_CHECK(esp_console_start_repl(repl));

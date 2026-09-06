@@ -1,5 +1,6 @@
 # Host test binaries + vendored Unity are build artifacts, not sources.
 # `make clean` regenerates them; `make` (re-)fetches Unity from GitHub.
 es8311_init_test
+command_bus_test
 *.dSYM/
 unity/

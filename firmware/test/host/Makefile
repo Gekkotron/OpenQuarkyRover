@@ -15,7 +15,7 @@ CFLAGS   := -std=c11 -Wall -Wextra -g -O0 -I. -I../../main -Iunity
 LDFLAGS  :=
 
 UNITY_SRC := unity/unity.c
-TESTS     := es8311_init_test
+TESTS     := es8311_init_test command_bus_test
 
 all: $(TESTS) run
 
@@ -27,6 +27,9 @@ unity/unity.c unity/unity.h unity/unity_internals.h:
 	@curl -fsSL https://raw.githubusercontent.com/ThrowTheSwitch/Unity/v2.5.2/src/unity_internals.h > unity/unity_internals.h
 
 es8311_init_test: es8311_init_test.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+command_bus_test: command_bus_test.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 run: $(TESTS)
