@@ -74,6 +74,8 @@ Files created or modified across the whole plan, one line each:
 
 ## Task 0: Order Skainet Studio custom wake word (external — day 1)
 
+> **Status: DEFERRED (2026-09-06).** Decision: ship M3 against the stock `wn9_hiesp` wake word ("Hi ESP") to avoid the Skainet order cost and 2–4 week lead time. Task 12 (wake word swap) becomes future work — the plan is already structured so the swap is a single-file drop-in whenever the order is placed. **Skip this task; start with Task 1.**
+
 Not code. Kicks off the critical-path external dependency on day 1 so it never blocks the ship.
 
 **Files:** none (append entry to spec's External Dependencies section only).
@@ -2234,6 +2236,8 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ---
 
 ## Task 12: Skainet wake-word swap (post-milestone, gated on Skainet delivery)
+
+> **Status: FUTURE WORK.** Task 0 is deferred (2026-09-06 decision to ship against stock `wn9_hiesp`). This task activates if and when a Skainet order is placed and delivered — the procedure is unchanged.
 
 Executed only when the Skainet order from Task 0 delivers `wn9_hiquarky.bin`. Kept as a plan task so the swap procedure is documented in one place.
 
