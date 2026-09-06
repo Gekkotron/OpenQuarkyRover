@@ -2368,7 +2368,17 @@ static const int PDM_CANDIDATES[] = {
 };
 #define PDM_CANDIDATES_N (sizeof(PDM_CANDIDATES) / sizeof(PDM_CANDIDATES[0]))
 
-#define PDM_SAMPLE_RATE_HZ 16000
+/* Output sample rate. This *sets* the PDM bit-clock via the ESP-IDF
+ * driver: BCLK = sample_rate * mclk_multiple / bclk_div, and the driver
+ * clamps bclk_div to >= 8. With mclk_multiple = 256 (default), that gives
+ * BCLK = sample_rate * 32.
+ *
+ * MP34DT05TR-A / MP34DT06JTR (and most modern PDM MEMS mics) need PDM
+ * CLK >= 1.2 MHz to leave sleep mode. sample_rate = 64000 gives BCLK =
+ * 2.048 MHz — comfortably inside the 1.2–3.25 MHz valid range. Using the
+ * ESP-IDF default of 16000 gave BCLK = 512 kHz which kept the mic
+ * asleep and made every pin pair look identical (all rail-hugging DC). */
+#define PDM_SAMPLE_RATE_HZ 64000
 
 /* Result of a single PDM capture. `rms` is the raw magnitude; `ac_rms` is
  * the magnitude after subtracting `mean` (DC offset). Real audio has
