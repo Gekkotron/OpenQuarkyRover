@@ -220,7 +220,7 @@ static void i2c_bus_resume_persistent(bool was_active)
         .device_address  = TLC59108_ADDR,
         .scl_speed_hz    = (uint32_t)s_i2c_hz,
     };
-    /* s_tlc_ready stays false — caller runs tlc-init to re-configure. */
+    /* s_tlc_ready stays false — caller runs bb-tlc-init to re-configure. */
     i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_tlc);
 }
 
@@ -646,27 +646,13 @@ static int cmd_tlc_speed(int argc, char **argv)
     return 0;
 }
 
-static int cmd_tlc_init(int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    if (!s_tlc) { printf("no TLC59108 device handle — I2C bus down?\n"); return 1; }
-    esp_err_t err = tlc59108_init();
-    if (err != ESP_OK) {
-        printf("tlc-init failed: %s\n", esp_err_to_name(err));
-        s_tlc_ready = false;
-        return 1;
-    }
-    printf("TLC59108 initialised (97 kHz fixed), all channels parked off\n");
-    return 0;
-}
-
 static int cmd_tlc_set(int argc, char **argv)
 {
     if (argc < 3) { printf("usage: tlc-set <ch 0-7> <sink-pct 0-100>\n"
                            "       (sink-pct is the fraction of time the open-drain sink is ON,\n"
                            "        i.e. the fraction of time the output is pulled LOW —\n"
                            "        polarity is INVERTED relative to the DRV8833's input logic)\n"); return 1; }
-    if (!s_tlc_ready) { printf("run `tlc-init` first\n"); return 1; }
+    if (!s_tlc_ready) { printf("run `bb-tlc-init` first\n"); return 1; }
     int ch  = atoi(argv[1]);
     int pct = atoi(argv[2]);
     esp_err_t err = tlc59108_set_pct(ch, pct);
@@ -691,7 +677,7 @@ static int cmd_tlc_sweep(int argc, char **argv)
     if (hold_ms < 200)  hold_ms = 200;
     if (hold_ms > 5000) hold_ms = 5000;
 
-    if (!s_tlc_ready) { printf("run `tlc-init` first\n"); return 1; }
+    if (!s_tlc_ready) { printf("run `bb-tlc-init` first\n"); return 1; }
 
     printf("--- TLC59108 sweep: 8 channels, %d ms per channel @ 50%% sink duty ---\n", hold_ms);
     for (int ch = 0; ch < 8; ++ch) {
@@ -2550,7 +2536,6 @@ static void register_commands(void)
         { .command = "led-pin",   .help = "reconfigure LED pin at runtime: led-pin <gpio>",  .func = cmd_led_pin },
         { .command = "motor",     .help = "DEPRECATED — A1/A2 are I2C now; use tlc-set",.func = cmd_motor },
         { .command = "stop",      .help = "park every TLC59108 channel off",             .func = cmd_motor_stop },
-        { .command = "tlc-init",  .help = "(re)initialise TLC59108 (97 kHz fixed)",       .func = cmd_tlc_init },
         { .command = "tlc-diag",  .help = "reset the persistent I2C bus and scan for TLC59108 & neighbours", .func = cmd_tlc_diag },
         { .command = "tlc-speed", .help = "reopen the I2C bus + TLC device at a different SCL clock: tlc-speed <hz>", .func = cmd_tlc_speed },
         { .command = "tlc-addr",  .help = "point the driver at a different I2C address: tlc-addr <hex, e.g. 0x0a>", .func = cmd_tlc_addr },
@@ -2573,7 +2558,7 @@ static void register_commands(void)
         { .command = "button-state",.help = "classify GPIO 7 ADC into NONE / L / R / BOTH: button-state [seconds]", .func = cmd_button_state },
         { .command = "i2c-hunt-full", .help = "brute-force every ordered (SDA, SCL) pair of candidate pins (~5 min)", .func = cmd_i2c_hunt_full },
         { .command = "bb-scan",       .help = "bit-banged I2C scan (bypasses ESP-IDF driver): bb-scan [sda scl]", .func = cmd_bb_scan },
-        { .command = "bb-tlc-init",   .help = "init TLC59108 via bit-bang (works when tlc-init doesn't)", .func = cmd_bb_tlc_init },
+        { .command = "bb-tlc-init",   .help = "init TLC59108 via bit-bang I2C (the working motor-driver init on this board)", .func = cmd_bb_tlc_init },
         { .command = "bb-tlc-set",    .help = "drive one TLC59108 channel via bit-bang: bb-tlc-set <ch 0-7> <pct 0-100>", .func = cmd_bb_tlc_set },
         { .command = "bb-tlc-sweep",  .help = "cycle all 8 TLC59108 channels via bit-bang (2 s each) — find which is M1/M2/P1..P4", .func = cmd_bb_tlc_sweep },
         { .command = "es-verify",     .help = "M3 codec check: drive MCLK on ES8311_I2S_MCLK and read product ID (expect 0x83) via bit-bang I2C", .func = cmd_es_verify },
@@ -2619,7 +2604,7 @@ void app_main(void)
                 ESP_LOGI(TAG, "TLC59108 @ 0x%02x online (97 kHz fixed, all channels parked off)",
                          TLC59108_ADDR);
             } else {
-                ESP_LOGW(TAG, "TLC59108 present but init failed — run `tlc-init` at the REPL");
+                ESP_LOGW(TAG, "TLC59108 present but ESP-IDF I2C init failed — run `bb-tlc-init` at the REPL");
             }
         } else {
             ESP_LOGW(TAG, "could not add TLC59108 (0x%02x) to I2C bus", TLC59108_ADDR);
