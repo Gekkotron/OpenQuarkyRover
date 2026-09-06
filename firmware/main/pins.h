@@ -142,22 +142,19 @@
 
 #define ES8311_I2C_ADDR     0x18  /* 7-bit; datasheet §Register 0xFD returns 0x83 */
 
-/* --- Digital I²S MEMS microphone (M3 Task 4) ------------------------- */
-/*
- * The on-board mic is an omnidirectional digital MEMS microphone
- * (INMP441-family) that talks I²S DIRECTLY to the ESP32-S3 over its own
- * three-wire bus — completely independent of the ES8311 codec above,
- * which is on the DAC / speaker side. The mic needs no MCLK, no analog
- * routing, and no codec init: just I²S RX in master mode.
+/* --- Legacy "separate digital MEMS mic on 40/41/42" defs (falsified) --
  *
- * Slot format on the wire: 24-bit PCM in a 32-bit slot, MSB-first,
- * one channel (typical INMP441). Our i2s_std config reads that as
- * 16-bit mono by asking the driver to sample the top 16 bits of a
- * 32-bit slot — matches ESP-SR's 16 kHz mono s16le expectation
- * without a resample.
+ * The M3 branch initially assumed the mic was an INMP441-family digital
+ * MEMS on its own I²S bus at pins 40/41/42. This turned out to be wrong:
+ * the stock firmware strings dump proved the mic is analog and goes
+ * through the ES8311 codec (MIC_GAIN_0DB..42DB matches the codec's PGA
+ * ladder exactly; ESP-ADF es8311 driver referenced directly). The real
+ * mic I²S bus is the ES8311 one above: MCLK=16 BCLK=9 LRCK=45 DIN=10.
  *
- * Provenance: hardware notes from the vendor (Quarky Intellio spec).
- */
-#define MIC_I2S_SCK         40    /* BCLK from ESP32 (I²S master) */
-#define MIC_I2S_WS          41    /* WS / LRCLK from ESP32 */
-#define MIC_I2S_SD          42    /* SD / DIN — mic drives this */
+ * The constants below are kept only so the legacy diagnostic commands
+ * that reference them (voice-scan, mic-perm, mic-enable-scan) still
+ * compile. They should be removed together with those commands once
+ * the ES8311 mic path is verified working. */
+#define MIC_I2S_SCK         40    /* legacy, unused by audio_capture   */
+#define MIC_I2S_WS          41    /* legacy, unused by audio_capture   */
+#define MIC_I2S_SD          42    /* legacy, unused by audio_capture   */

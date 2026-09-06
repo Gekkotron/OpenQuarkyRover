@@ -1964,13 +1964,13 @@ static int cmd_voice_record(int argc, char **argv)
     QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
     if (!q) { free(buf); printf("voice-record: queue alloc failed\n"); return 1; }
 
-    /* Bring the ES8311 codec up FIRST, even though the mic is on a
-     * separate I²S bus. The stock firmware initializes the codec before
-     * every recording; hypothesis (fork agent) is that the codec drives
-     * a GPO that enables the mic's VDD line. es8311_init sets REG44 to
-     * the "internal reference (ADCL + DACR)" mode (0x58) which is the
-     * likeliest place for a mic-enable side effect. Failure here is
-     * non-fatal — proceed to try the capture path regardless. */
+    /* Bring the ES8311 codec up FIRST. The stock firmware strings dump
+     * proved the mic is analog going through this codec's ADC (MIC_GAIN_*
+     * enum matches the codec's PGA ladder; ESP-ADF es8311 driver is
+     * referenced directly). LEDC drives MCLK just long enough for the
+     * codec to accept register writes; audio_capture_start_ex then
+     * re-binds MCLK to the I²S peripheral and reads the ADC output on
+     * the codec's I²S DIN (GPIO 10) in the LEFT slot. */
     ledc_timer_config_t mclk_timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_1_BIT,
@@ -1995,13 +1995,10 @@ static int cmd_voice_record(int argc, char **argv)
     /* Let any codec GPO settle before starting the I²S RX path. */
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* Digital MEMS mics have an L/R pin that hardwires which I²S slot the
-     * mic drives. When the pin is tied high the mic drives RIGHT; low, it
-     * drives LEFT. Empty slot reads back as all-1s (0xFFFF as int16) —
-     * so a solid stream of -1 samples means we're on the wrong slot.
-     * The Quarky Intellio mic ties L/R high → we read RIGHT. */
-    audio_capture_config_t cfg = { .din_gpio = MIC_I2S_SD,
-                                   .slot     = AUDIO_CAPTURE_SLOT_RIGHT };
+    /* ES8311 stock ADC-only config routes internal ADCL to the L slot
+     * (REG44=0x58). Read LEFT; RIGHT will be silent by design here. Pass
+     * .din_gpio=0 so audio_capture uses its ES8311_I2S_DIN default. */
+    audio_capture_config_t cfg = { .slot = AUDIO_CAPTURE_SLOT_LEFT };
     esp_err_t r = audio_capture_start_ex(q, &cfg);
     if (r != ESP_OK) {
         printf("voice-record: audio_capture_start -> %s\n", esp_err_to_name(r));

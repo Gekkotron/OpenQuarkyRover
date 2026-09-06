@@ -43,9 +43,14 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
     if (s_running) return ESP_ERR_INVALID_STATE;
     if (!out_queue) return ESP_ERR_INVALID_ARG;
 
-    int din_pin  = (cfg && cfg->din_gpio  > 0) ? cfg->din_gpio  : MIC_I2S_SD;
-    int bclk_pin = (cfg && cfg->bclk_gpio > 0) ? cfg->bclk_gpio : MIC_I2S_SCK;
-    int ws_pin   = (cfg && cfg->ws_gpio   > 0) ? cfg->ws_gpio   : MIC_I2S_WS;
+    /* Mic path on this board is analog → ES8311 codec ADC → I²S. Defaults
+     * point at the codec's I²S pins (BCLK=9, LRCK=45, DIN=10); the old
+     * INMP441-on-pins-40/41/42 assumption was falsified by the stock
+     * firmware strings dump (uses ESP-ADF ES8311 driver + MIC_GAIN_*
+     * enum matching the codec's 0..42 dB PGA ladder). */
+    int din_pin  = (cfg && cfg->din_gpio  > 0) ? cfg->din_gpio  : ES8311_I2S_DIN;
+    int bclk_pin = (cfg && cfg->bclk_gpio > 0) ? cfg->bclk_gpio : ES8311_I2S_BCLK;
+    int ws_pin   = (cfg && cfg->ws_gpio   > 0) ? cfg->ws_gpio   : ES8311_I2S_LRCK;
     audio_capture_slot_t slot = cfg ? cfg->slot : AUDIO_CAPTURE_SLOT_LEFT;
 
     s_queue   = out_queue;
@@ -58,24 +63,26 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
     chan_cfg.dma_frame_num = 320;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_rx_chan), TAG, "new_channel");
 
-    /* INMP441-family digital MEMS: 24-bit sample in a 32-bit slot, MSB-first.
-     * ESP-IDF's I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG with data=16 / slot=32
-     * makes the driver take the top 16 bits of each 32-bit slot — that is
-     * the signed high-order half of the 24-bit sample, which is exactly
-     * what ESP-SR wants (16 kHz mono s16le, no resample). */
+    /* ES8311 outputs standard 16-bit I²S Philips, mono on the LEFT slot in
+     * its stock ADC-only config (REG44=0x58 routes internal ADCL). No
+     * INMP441 24-in-32 trick; the slot width matches the sample width. */
     i2s_slot_mode_t slot_mode = (slot == AUDIO_CAPTURE_SLOT_BOTH)
                                     ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO;
     i2s_std_slot_config_t slot_cfg =
         I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode);
-    slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
     if (slot == AUDIO_CAPTURE_SLOT_LEFT)  slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     if (slot == AUDIO_CAPTURE_SLOT_RIGHT) slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
 
+    /* MCLK for the ES8311 comes from GPIO 16, driven either by the LEDC
+     * hack in cmd_es_init / cmd_voice_record (transitional) or by the I²S
+     * peripheral itself when we let it. Route it via I²S so a single
+     * subsystem owns the whole codec clock tree — the LEDC path can then
+     * be dropped from the REPL command in a follow-up. */
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(16000),
         .slot_cfg = slot_cfg,
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,        /* digital MEMS mic needs no MCLK */
+            .mclk = ES8311_I2S_MCLK,
             .bclk = bclk_pin,
             .ws   = ws_pin,
             .dout = I2S_GPIO_UNUSED,        /* RX-only path */
@@ -97,9 +104,9 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
         s_rx_chan = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "capture started (16 kHz mono s16le, BCLK=GPIO%d WS=GPIO%d "
-                  "DIN=GPIO%d slot=%s, 32-bit slot / 16-bit sample)",
-             bclk_pin, ws_pin, din_pin,
+    ESP_LOGI(TAG, "capture started (16 kHz mono s16le, MCLK=GPIO%d BCLK=GPIO%d "
+                  "WS=GPIO%d DIN=GPIO%d slot=%s)",
+             ES8311_I2S_MCLK, bclk_pin, ws_pin, din_pin,
              slot == AUDIO_CAPTURE_SLOT_LEFT ? "L" :
              slot == AUDIO_CAPTURE_SLOT_RIGHT ? "R" : "LR");
     return ESP_OK;
