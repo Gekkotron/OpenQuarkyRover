@@ -340,54 +340,9 @@ static esp_err_t tlc59108_all_off(void)
     return tlc_write_reg(TLC59108_LEDOUT1, 0x00);
 }
 
-/* --- motors (LEGACY: LEDC PWM on A1/A2 — do NOT use, corrupts I2C) --- */
-/* Kept only so the existing sweep/motor commands still compile. The
- * `motor` command below is now a stub that refuses to run.            */
-
-static void motors_init(void)
-{
-    ledc_timer_config_t timer = {
-        .speed_mode      = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = MOTOR_PWM_RES_BITS,
-        .timer_num       = LEDC_TIMER_0,
-        .freq_hz         = MOTOR_PWM_FREQ_HZ,
-        .clk_cfg         = LEDC_AUTO_CLK,
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&timer));
-
-    ledc_channel_config_t ch1 = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel    = LEDC_CHANNEL_0,
-        .timer_sel  = LEDC_TIMER_0,
-        .intr_type  = LEDC_INTR_DISABLE,
-        .gpio_num   = PIN_MOTOR_1,
-        .duty       = 0,
-        .hpoint     = 0,
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ch1));
-
-    ledc_channel_config_t ch2 = ch1;
-    ch2.channel  = LEDC_CHANNEL_1;
-    ch2.gpio_num = PIN_MOTOR_2;
-    ESP_ERROR_CHECK(ledc_channel_config(&ch2));
-}
-
-static void motor_set(int m1_pct, int m2_pct)
-{
-    if (m1_pct < 0)   m1_pct = 0;
-    if (m1_pct > 100) m1_pct = 100;
-    if (m2_pct < 0)   m2_pct = 0;
-    if (m2_pct > 100) m2_pct = 100;
-
-    const uint32_t max_duty = (1U << MOTOR_PWM_RES_BITS) - 1;
-    const uint32_t d1 = (uint32_t)m1_pct * max_duty / 100;
-    const uint32_t d2 = (uint32_t)m2_pct * max_duty / 100;
-
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, d1);
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, d2);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
-}
+/* Legacy LEDC-on-A1/A2 motor path (motors_init / motor_set) removed —
+ * A1/A2 are actually the expansion-board I²C bus; motor drive goes via
+ * TLC59108 through bb_motor_set. See pins.h comment on PIN_MOTOR_*.  */
 
 /* --- servo (LEDC PWM 50 Hz) ------------------------------------------ */
 
@@ -493,11 +448,15 @@ static int cmd_motor(int argc, char **argv)
     if (!s_bb_ready) { printf("run `bb-tlc-init` first\n"); return 1; }
     int L = atoi(argv[1]);
     int R = atoi(argv[2]);
-    if (!bb_motor_set(L, R)) {
-        printf("motor: NACK on TLC59108 write — try `bb-tlc-init` again\n");
-        return 1;
-    }
-    printf("motor: L=%d%% R=%d%%\n", L, R);
+    if (L < -100) L = -100;
+    if (L >  100) L =  100;
+    if (R < -100) R = -100;
+    if (R >  100) R =  100;
+    command_t c = { .id = CMD_MOTOR, .source = SRC_REPL,
+                    .as.motor = { .left = (int8_t)L, .right = (int8_t)R } };
+    esp_err_t rc = command_bus_publish(&c);
+    if (rc != ESP_OK) { printf("motor: publish failed: %s\n", esp_err_to_name(rc)); return 1; }
+    printf("motor: L=%d%% R=%d%% via bus\n", L, R);
     return 0;
 }
 
@@ -508,11 +467,10 @@ static int cmd_motor_stop(int argc, char **argv)
         printf("TLC59108 not initialised — run `bb-tlc-init` first\n");
         return 1;
     }
-    if (!bb_motor_set(0, 0)) {
-        printf("stop: NACK on TLC59108 write\n");
-        return 1;
-    }
-    printf("stopped (both motors in brake)\n");
+    command_t c = { .id = CMD_STOP, .source = SRC_REPL };
+    esp_err_t rc = command_bus_publish(&c);
+    if (rc != ESP_OK) { printf("stop: publish failed: %s\n", esp_err_to_name(rc)); return 1; }
+    printf("stopped (both motors in brake) via bus\n");
     return 0;
 }
 
@@ -520,9 +478,34 @@ static int cmd_servo(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: servo <deg 0-180>\n"); return 1; }
     int d = atoi(argv[1]);
-    servo_set_deg(d);
-    printf("servo (GPIO %d) = %d deg\n", s_servo_pin, d);
+    if (d < 0)   d = 0;
+    if (d > 180) d = 180;
+    /* Degrees → pulse-width (µs). Bus dispatcher routes to servo_set_us,
+     * which does the LEDC duty write. Same math as the local servo_set_deg
+     * kept below for now (called by cmd_selftest / cmd_sweep_servo). */
+    uint16_t us = (uint16_t)(SERVO_MIN_US +
+                             (SERVO_MAX_US - SERVO_MIN_US) * d / 180);
+    command_t c = { .id = CMD_SERVO, .source = SRC_REPL,
+                    .as.servo = { .channel = 1, .us = us } };
+    esp_err_t rc = command_bus_publish(&c);
+    if (rc != ESP_OK) { printf("servo: publish failed: %s\n", esp_err_to_name(rc)); return 1; }
+    printf("servo (GPIO %d) = %d deg → %u µs via bus\n", s_servo_pin, d, (unsigned)us);
     return 0;
+}
+
+/* Non-static + int return so command_bus.c's WEAK stub is overridden.
+ * Channel is currently unused (this board has one servo on LEDC_CHANNEL_2);
+ * kept in the signature for M4 multi-servo. */
+int servo_set_us(uint8_t channel, uint16_t us)
+{
+    (void)channel;
+    if (us < SERVO_MIN_US) us = SERVO_MIN_US;
+    if (us > SERVO_MAX_US) us = SERVO_MAX_US;
+    const uint32_t max_duty = (1U << SERVO_PWM_RES_BITS) - 1;
+    const uint32_t duty     = (uint32_t)us * max_duty / 20000;   /* 50 Hz → 20 ms period */
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
+    return 1;
 }
 
 static int cmd_servo_pin(int argc, char **argv)
@@ -1658,6 +1641,18 @@ static bool bb_tlc_set_channel(int sda, int scl, int ch, uint8_t pwm_val)
     return bb_write_reg(sda, scl, TLC59108_ADDR, TLC59108_PWM0 + ch, pwm_val);
 }
 
+/* Non-static + int return so command_bus.c's WEAK stub is overridden.
+ * Percent → raw sink duty conversion + fixed bus pins so the dispatcher
+ * (and voice, later) can drive one channel without duplicating the
+ * TLC59108 setup dance. */
+int bb_tlc_set_pct(uint8_t channel, uint8_t percent)
+{
+    if (channel > 7) return 0;
+    if (percent > 100) percent = 100;
+    uint8_t pwm = (uint8_t)((uint32_t)percent * 255 / 100);
+    return bb_tlc_set_channel(PIN_I2C_SDA, PIN_I2C_SCL, channel, pwm) ? 1 : 0;
+}
+
 static int cmd_bb_tlc_init(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -1696,12 +1691,11 @@ static int cmd_bb_tlc_set(int argc, char **argv)
     if (ch < 0 || ch > 7)  { printf("ch out of range (0..7)\n"); return 1; }
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
-    uint8_t val = (uint8_t)(pct * 255 / 100);
-    if (!bb_tlc_set_channel(PIN_I2C_SDA, PIN_I2C_SCL, ch, val)) {
-        printf("bb-tlc-set: NACK writing channel %d\n", ch);
-        return 1;
-    }
-    printf("bb-tlc-set: ch %d = %d%% (raw 0x%02x sink duty)\n", ch, pct, val);
+    command_t c = { .id = CMD_BB_TLC_SET, .source = SRC_REPL,
+                    .as.bb_tlc = { .channel = (uint8_t)ch, .percent = (uint8_t)pct } };
+    esp_err_t rc = command_bus_publish(&c);
+    if (rc != ESP_OK) { printf("bb-tlc-set: publish failed: %s\n", esp_err_to_name(rc)); return 1; }
+    printf("bb-tlc-set: ch %d = %d%% via bus\n", ch, pct);
     return 0;
 }
 
