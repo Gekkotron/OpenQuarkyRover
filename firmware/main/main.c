@@ -2370,12 +2370,24 @@ static const int PDM_CANDIDATES[] = {
 
 #define PDM_SAMPLE_RATE_HZ 16000
 
-/* Read `ms` milliseconds of PDM mono audio on (clk, dat) and fill out
- * n_samples / rms / peak2peak. Fully allocates + tears down the I2S
- * channel each call so the caller can iterate pin pairs freely.
- * Returns ESP_OK on success; on failure the out-params are undefined. */
-static esp_err_t pdm_capture(int clk_gpio, int dat_gpio, int ms,
-                             int *out_n, double *out_rms, int *out_p2p)
+/* Result of a single PDM capture. `rms` is the raw magnitude; `ac_rms` is
+ * the magnitude after subtracting `mean` (DC offset). Real audio has
+ * mean ≈ 0 and ac_rms carrying the signal; a floating DIN pin decoded by
+ * the ESP-IDF PDM decimator produces a large DC bias (rail-hugging) with
+ * tiny ac_rms — so `ac_rms` is the discriminator, not `rms` or `peak2peak`. */
+typedef struct {
+    int    n;
+    double mean;
+    double rms;
+    double ac_rms;
+    int    p2p;
+} pdm_stats_t;
+
+/* Read `ms` milliseconds of PDM mono audio on (clk, dat). Fully allocates
+ * and tears down the I2S channel each call so the caller can iterate pin
+ * pairs freely. A short settling window is captured and discarded first
+ * because most PDM MEMS mics need a few ms of clock before valid output. */
+static esp_err_t pdm_capture(int clk_gpio, int dat_gpio, int ms, pdm_stats_t *out)
 {
     if (ms <= 0) ms = 100;
 
@@ -2400,6 +2412,17 @@ static esp_err_t pdm_capture(int clk_gpio, int dat_gpio, int ms,
     e = i2s_channel_enable(rx);
     if (e != ESP_OK) { i2s_del_channel(rx); return e; }
 
+    /* Settling: read and discard ~50 ms so the mic (and the decimator's
+     * DC blocker) reach steady state before we start measuring. */
+    const int settle_samples = (PDM_SAMPLE_RATE_HZ / 1000) * 50;
+    int16_t *settle_buf = (int16_t *)malloc(settle_samples * sizeof(int16_t));
+    if (settle_buf) {
+        size_t discarded = 0;
+        (void)i2s_channel_read(rx, settle_buf, settle_samples * sizeof(int16_t),
+                               &discarded, pdMS_TO_TICKS(150));
+        free(settle_buf);
+    }
+
     int nsamples = (PDM_SAMPLE_RATE_HZ / 1000) * ms;
     size_t nbytes = nsamples * sizeof(int16_t);
     int16_t *buf = (int16_t *)malloc(nbytes);
@@ -2419,18 +2442,29 @@ static esp_err_t pdm_capture(int clk_gpio, int dat_gpio, int ms,
 
     int n = (int)(bytes_read / sizeof(int16_t));
     int16_t vmin = INT16_MAX, vmax = INT16_MIN;
-    int64_t sum_sq = 0;
+    int64_t sum = 0, sum_sq = 0;
     for (int i = 0; i < n; i++) {
         int16_t s = buf[i];
         if (s < vmin) vmin = s;
         if (s > vmax) vmax = s;
+        sum    += s;
         sum_sq += (int32_t)s * (int32_t)s;
     }
+
+    double mean = n > 0 ? (double)sum / (double)n : 0.0;
+    /* var = E[s^2] - E[s]^2, then ac_rms = sqrt(var). Guard against
+     * negative from floating-point rounding on stuck-constant streams. */
+    double ms_val = n > 0 ? (double)sum_sq / (double)n : 0.0;
+    double var    = ms_val - mean * mean;
+    if (var < 0.0) var = 0.0;
+
     free(buf);
 
-    *out_n   = n;
-    *out_rms = n > 0 ? sqrt((double)sum_sq / (double)n) : 0.0;
-    *out_p2p = (int)vmax - (int)vmin;
+    out->n      = n;
+    out->mean   = mean;
+    out->rms    = sqrt(ms_val);
+    out->ac_rms = sqrt(var);
+    out->p2p    = (int)vmax - (int)vmin;
     return ESP_OK;
 }
 
@@ -2444,14 +2478,14 @@ static int cmd_pdm_probe(int argc, char **argv)
     int dat = atoi(argv[2]);
     int ms  = (argc >= 4) ? atoi(argv[3]) : 200;
 
-    int n = 0, p2p = 0;
-    double rms = 0.0;
-    esp_err_t e = pdm_capture(clk, dat, ms, &n, &rms, &p2p);
+    pdm_stats_t st = {0};
+    esp_err_t e = pdm_capture(clk, dat, ms, &st);
     if (e != ESP_OK) {
         printf("clk=%d dat=%d FAILED (%s)\n", clk, dat, esp_err_to_name(e));
         return 1;
     }
-    printf("clk=%d dat=%d n=%d rms=%.1f peak2peak=%d\n", clk, dat, n, rms, p2p);
+    printf("clk=%d dat=%d n=%d mean=%.0f rms=%.0f ac_rms=%.0f peak2peak=%d\n",
+           clk, dat, st.n, st.mean, st.rms, st.ac_rms, st.p2p);
     return 0;
 }
 
@@ -2459,7 +2493,7 @@ static int cmd_pdm_watch(int argc, char **argv)
 {
     if (argc < 3) {
         printf("usage: pdm-watch <clk_gpio> <dat_gpio> [seconds]\n"
-               "       prints RMS/peak every 100 ms — snap fingers to see it spike\n");
+               "       prints mean / ac_rms every 100 ms — snap fingers to see ac_rms spike\n");
         return 1;
     }
     int clk = atoi(argv[1]);
@@ -2469,34 +2503,41 @@ static int cmd_pdm_watch(int argc, char **argv)
 
     int chunks = secs * 10;
     for (int i = 0; i < chunks; i++) {
-        int n = 0, p2p = 0;
-        double rms = 0.0;
-        esp_err_t e = pdm_capture(clk, dat, 100, &n, &rms, &p2p);
+        pdm_stats_t st = {0};
+        esp_err_t e = pdm_capture(clk, dat, 100, &st);
         if (e != ESP_OK) {
             printf("[%d] FAILED (%s)\n", i, esp_err_to_name(e));
             return 1;
         }
-        printf("[%3d] rms=%7.1f peak2peak=%5d\n", i, rms, p2p);
+        printf("[%3d] mean=%6.0f ac_rms=%6.0f peak2peak=%5d\n",
+               i, st.mean, st.ac_rms, st.p2p);
     }
     return 0;
 }
+
+/* HIT threshold: significant AC energy AND that energy dominates any DC
+ * bias. Floating DIN pins produce huge rms/peak2peak but ~0 ac_rms
+ * because the decimator's output is stuck near a rail. */
+#define PDM_HIT_AC_RMS_MIN 400.0
 
 static int cmd_pdm_scan(int argc, char **argv)
 {
     int ms = (argc >= 2) ? atoi(argv[1]) : 100;
     if (ms < 20) ms = 20;
 
-    /* If a specific CLK is given, restrict scan to that CLK vs all
-     * candidate DAT pins. Otherwise brute-force every ordered pair
-     * (~PDM_CANDIDATES_N * (PDM_CANDIDATES_N-1) probes). */
     int fixed_clk = (argc >= 3) ? atoi(argv[2]) : -1;
 
-    printf("pdm-scan: %d candidate pins, %d ms per probe\n",
+    printf("pdm-scan: %d candidate pins, %d ms per probe (settle 50 ms)\n",
            (int)PDM_CANDIDATES_N, ms);
-    printf("      make continuous noise near the mic while this runs;\n");
-    printf("      the true (CLK, DAT) pair will show a large peak2peak.\n");
+    printf("      keep talking / making noise near the mic during the run;\n");
+    printf("      a real mic shows ac_rms >= %.0f. Floating pins hit high\n"
+           "      rms/peak2peak with ac_rms ~ 0 and are ignored.\n",
+           PDM_HIT_AC_RMS_MIN);
 
     int probes = 0, hits = 0;
+    double best_ac = 0.0;
+    int    best_clk = -1, best_dat = -1;
+
     for (size_t i = 0; i < PDM_CANDIDATES_N; i++) {
         int clk = PDM_CANDIDATES[i];
         if (fixed_clk >= 0 && clk != fixed_clk) continue;
@@ -2505,26 +2546,32 @@ static int cmd_pdm_scan(int argc, char **argv)
             if (i == j) continue;
             int dat = PDM_CANDIDATES[j];
 
-            int n = 0, p2p = 0;
-            double rms = 0.0;
-            esp_err_t e = pdm_capture(clk, dat, ms, &n, &rms, &p2p);
+            pdm_stats_t st = {0};
+            esp_err_t e = pdm_capture(clk, dat, ms, &st);
             probes++;
 
-            if (e != ESP_OK) {
-                /* Skip silently — many pin pairs will refuse to init on
-                 * strapping / input-only combinations; not a hit signal. */
-                continue;
-            }
-            /* Baseline noise on a floating DAT pin is typically flat
-             * (~0 p2p). Anything above a few hundred is worth a look. */
-            if (p2p >= 200) {
-                printf("  HIT clk=%2d dat=%2d rms=%7.1f peak2peak=%5d\n",
-                       clk, dat, rms, p2p);
+            if (e != ESP_OK) continue;
+
+            if (st.ac_rms >= PDM_HIT_AC_RMS_MIN) {
+                printf("  HIT clk=%2d dat=%2d mean=%6.0f ac_rms=%6.0f p2p=%5d\n",
+                       clk, dat, st.mean, st.ac_rms, st.p2p);
                 hits++;
+                if (st.ac_rms > best_ac) {
+                    best_ac  = st.ac_rms;
+                    best_clk = clk;
+                    best_dat = dat;
+                }
             }
         }
     }
     printf("pdm-scan done: %d probes, %d hits\n", probes, hits);
+    if (best_clk >= 0) {
+        printf("  best: clk=%d dat=%d ac_rms=%.0f — try `pdm-watch %d %d 5`\n",
+               best_clk, best_dat, best_ac, best_clk, best_dat);
+    } else {
+        printf("  no candidate showed AC energy. mic is not PDM on any free\n"
+               "  GPIO, or needs an enable/MCLK pin held first.\n");
+    }
     return 0;
 }
 
