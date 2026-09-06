@@ -1976,6 +1976,37 @@ static int cmd_voice_record(int argc, char **argv)
     QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
     if (!q) { free(buf); printf("voice-record: queue alloc failed\n"); return 1; }
 
+    /* Bring the ES8311 codec up FIRST, even though the mic is on a
+     * separate I²S bus. The stock firmware initializes the codec before
+     * every recording; hypothesis (fork agent) is that the codec drives
+     * a GPO that enables the mic's VDD line. es8311_init sets REG44 to
+     * the "internal reference (ADCL + DACR)" mode (0x58) which is the
+     * likeliest place for a mic-enable side effect. Failure here is
+     * non-fatal — proceed to try the capture path regardless. */
+    ledc_timer_config_t mclk_timer = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_1_BIT,
+        .timer_num       = LEDC_TIMER_2,
+        .freq_hz         = 4000000,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    (void)ledc_timer_config(&mclk_timer);
+    ledc_channel_config_t mclk_ch = {
+        .gpio_num   = ES8311_I2S_MCLK,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_3,
+        .timer_sel  = LEDC_TIMER_2,
+        .duty       = 1,
+        .hpoint     = 0,
+    };
+    (void)ledc_channel_config(&mclk_ch);
+    bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
+    esp_err_t codec_r = es8311_init();
+    printf("voice-record: es8311_init -> %s (mic-enable side-effect hypothesis)\n",
+           esp_err_to_name(codec_r));
+    /* Let any codec GPO settle before starting the I²S RX path. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     /* Digital MEMS mics have an L/R pin that hardwires which I²S slot the
      * mic drives. When the pin is tied high the mic drives RIGHT; low, it
      * drives LEFT. Empty slot reads back as all-1s (0xFFFF as int16) —
@@ -2196,6 +2227,101 @@ static int cmd_mic_perm(int argc, char **argv)
     return 0;
 }
 
+/* mic-enable-scan: sweep unused GPIOs, drive each HIGH (then LOW), and
+ * check whether the mic starts producing non-degenerate samples. Answers
+ * the "which pin powers or ungates the mic" question that neither the
+ * strings dump nor the codec-init hypothesis could nail down.
+ *
+ * For each candidate:
+ *   1. GPIO N → OUTPUT, HIGH
+ *   2. wait 200 ms for a MOSFET / LDO to settle
+ *   3. start I²S RX (fixed MIC_I2S_* pins), drain, read 8 frames
+ *   4. compute max|s| and count of 0xFFFF-only samples
+ *   5. reset GPIO N to INPUT (release)
+ *
+ * Winner: the pin that produces max|s| >> 1 with neg1 < 100 (i.e. the
+ * mic is actually driving data, not the empty-slot pull-up). ~700 ms
+ * per pin × ~25 candidates ≈ 18 s. */
+static const int MIC_ENABLE_CAND[] = {
+    3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 21,
+    33, 34, 35, 36, 37, 38, 39, 46, 47
+};
+static const size_t MIC_ENABLE_CAND_COUNT =
+    sizeof(MIC_ENABLE_CAND) / sizeof(MIC_ENABLE_CAND[0]);
+
+static int cmd_mic_enable_scan(int argc, char **argv)
+{
+    /* Optional level arg: `mic-enable-scan 0` drives each candidate LOW
+     * (active-low enable); default is HIGH. Handy after a HIGH-polarity
+     * scan finds nothing. */
+    int level = (argc >= 2 && atoi(argv[1]) == 0) ? 0 : 1;
+
+    QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
+    if (!q) { printf("mic-enable-scan: queue alloc failed\n"); return 1; }
+
+    printf("--- mic-enable-scan: try driving each of %zu candidate GPIOs %s ---\n",
+           MIC_ENABLE_CAND_COUNT, level ? "HIGH" : "LOW");
+    printf("    watching for max|s| >> 1 with neg1 < 100 on MIC pins (BCLK=%d WS=%d DIN=%d)\n",
+           MIC_I2S_SCK, MIC_I2S_WS, MIC_I2S_SD);
+
+    int best_max = 0;
+    int best_pin = -1;
+    int best_neg1 = 0;
+
+    for (size_t k = 0; k < MIC_ENABLE_CAND_COUNT; k++) {
+        int pin = MIC_ENABLE_CAND[k];
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, level);
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        audio_capture_config_t cfg = { .din_gpio = MIC_I2S_SD,
+                                       .slot = AUDIO_CAPTURE_SLOT_RIGHT };
+        if (audio_capture_start_ex(q, &cfg) != ESP_OK) {
+            gpio_set_level(pin, 0);
+            gpio_set_direction(pin, GPIO_MODE_INPUT);
+            continue;
+        }
+        int16_t frame[AUDIO_CAPTURE_FRAME_SAMPLES];
+        while (xQueueReceive(q, frame, 0) == pdTRUE) { }
+
+        int mx = 0, neg1 = 0;
+        for (int f = 0; f < 8; f++) {
+            if (xQueueReceive(q, frame, pdMS_TO_TICKS(200)) != pdTRUE) break;
+            for (size_t j = 0; j < AUDIO_CAPTURE_FRAME_SAMPLES; j++) {
+                int a = frame[j] < 0 ? -frame[j] : frame[j];
+                if (a > mx) mx = a;
+                if ((uint16_t)frame[j] == 0xFFFF) neg1++;
+            }
+        }
+        audio_capture_stop();
+
+        /* Release the pin so the next iteration starts clean. */
+        gpio_set_level(pin, 0);
+        gpio_set_direction(pin, GPIO_MODE_INPUT);
+
+        printf("  GPIO%-2d %s → max|s|=%-5d neg1=%d\n",
+               pin, level ? "HIGH" : "LOW ", mx, neg1);
+
+        if (mx > best_max && neg1 < 100) {
+            best_max = mx; best_pin = pin; best_neg1 = neg1;
+        }
+    }
+    vQueueDelete(q);
+
+    if (best_pin < 0) {
+        printf("--- mic-enable-scan: no GPIO woke the mic.\n");
+        printf("    Try polarity flip (some enables are active-LOW), or check\n");
+        printf("    the schematic — the enable may be behind a codec GPO,\n");
+        printf("    a shift-register, or an I²C GPIO expander.\n");
+        return 1;
+    }
+    printf("--- mic-enable-scan: best GPIO%d HIGH → max|s|=%d, neg1=%d\n",
+           best_pin, best_max, best_neg1);
+    printf("    Set this pin HIGH before every capture (via bb_init / gpio_set_level).\n");
+    return 0;
+}
+
 static int cmd_voice_stats(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -2274,6 +2400,7 @@ static void register_commands(void)
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
         { .command = "voice-inject-test", .help = "M3 diagnostic: publish a synthetic voice command through the bus: voice-inject-test <id 1..5>", .func = cmd_voice_inject_test },
+        { .command = "mic-enable-scan",   .help = "M3 diagnostic: sweep 21 candidate GPIOs, drive each HIGH, and look for the pin that ungates the mic (~18 s)", .func = cmd_mic_enable_scan },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); ++i) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
