@@ -17,8 +17,11 @@ extern void servo_set_deg(int deg);
 extern int  bb_motor_set_public(int m1_signed, int m2_signed);  /* returns 0 on ok, -1 on not-ready */
 
 /* ------------------------------------------------------------------ *
- *  Single-page HTML control UI.  Embedded as a string so we don't
- *  need a filesystem partition. Vanilla JS + fetch(); no framework.
+ *  Single-page HTML control UI. This rover's mechanics: M1 is the only
+ *  drive motor, and the servo turns the front wheels (Ackermann-ish
+ *  steering — 90° is straight ahead, <90° left, >90° right). So the
+ *  UI shape is throttle F/B for M1 and a separate steering row with
+ *  an explicit "Center" that snaps the servo back to 90°.
  * ------------------------------------------------------------------ */
 static const char INDEX_HTML[] =
 "<!doctype html><html><head>"
@@ -27,36 +30,48 @@ static const char INDEX_HTML[] =
 "<style>"
 "body{font-family:system-ui,sans-serif;margin:20px;background:#1b1e23;color:#eee;text-align:center}"
 "h1{margin:0 0 8px}"
-"h2{margin:24px 0 8px;font-size:1em;color:#8ab}"
-".pad{display:inline-grid;grid-template-columns:repeat(3,90px);gap:6px}"
-".pad button{width:90px;height:90px;font-size:1.8em;border:0;border-radius:12px;"
-"background:#334;color:#eee;touch-action:manipulation}"
-".pad button:active{background:#557}"
-".pad .sp{visibility:hidden}"
-"input[type=range]{width:80%;max-width:400px}"
+"h2{margin:24px 0 8px;font-size:1em;color:#8ab;letter-spacing:.08em;text-transform:uppercase}"
+".row{display:inline-flex;gap:8px;justify-content:center}"
+".btn{width:90px;height:90px;font-size:1.8em;border:0;border-radius:14px;"
+"background:#334;color:#eee;touch-action:manipulation;cursor:pointer}"
+".btn:active{background:#557}"
+".btn.stop{background:#6a2323}"
+".btn.stop:active{background:#8a3333}"
+".btn.center{background:#2b4a2b}"
+".btn.center:active{background:#3d6c3d}"
+"input[type=range]{width:80%;max-width:400px;margin-top:12px}"
 "input[type=color]{width:80px;height:40px;border:0;background:#334}"
+"#angle{display:inline-block;min-width:3em;color:#8ab}"
 "</style></head><body>"
 "<h1>OpenQuarkyRover</h1>"
 
-"<h2>Drive</h2>"
-"<div class=\"pad\">"
-"<span class=\"sp\"></span><button onclick=\"d(80,80)\">&uarr;</button><span class=\"sp\"></span>"
-"<button onclick=\"d(-80,80)\">&larr;</button><button onclick=\"s()\">&#9632;</button><button onclick=\"d(80,-80)\">&rarr;</button>"
-"<span class=\"sp\"></span><button onclick=\"d(-80,-80)\">&darr;</button><span class=\"sp\"></span>"
+"<h2>Drive (M1)</h2>"
+"<div class=\"row\">"
+"<button class=\"btn\" onclick=\"d(+1)\">&uarr;</button>"
+"<button class=\"btn stop\" onclick=\"stop()\">&#9632;</button>"
+"<button class=\"btn\" onclick=\"d(-1)\">&darr;</button>"
 "</div>"
+"<div style=\"margin-top:12px\"><input id=\"sp\" type=\"range\" min=\"0\" max=\"100\" value=\"80\" oninput=\"document.getElementById('spv').textContent=this.value\"></div>"
+"<div>speed: <span id=\"spv\">80</span>%</div>"
 
-"<h2>Servo</h2>"
-"<input type=\"range\" min=\"0\" max=\"180\" value=\"90\" oninput=\"v(this.value)\">"
+"<h2>Steer (servo)</h2>"
+"<div class=\"row\">"
+"<button class=\"btn\" onclick=\"v(45)\">&larr;</button>"
+"<button class=\"btn center\" onclick=\"v(90)\">&#8226;</button>"
+"<button class=\"btn\" onclick=\"v(135)\">&rarr;</button>"
+"</div>"
+"<div><input id=\"sl\" type=\"range\" min=\"0\" max=\"180\" value=\"90\" oninput=\"v(this.value)\"></div>"
+"<div>angle: <span id=\"angle\">90</span>&deg;</div>"
 
 "<h2>LED</h2>"
 "<input type=\"color\" value=\"#000000\" oninput=\"c(this.value)\">"
-"<button onclick=\"c('#000000')\" style=\"margin-left:12px\">off</button>"
+"<button class=\"btn\" style=\"width:auto;height:auto;font-size:1em;padding:8px 16px;margin-left:12px\" onclick=\"c('#000000')\">off</button>"
 
 "<script>"
 "const p=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});"
-"const d=(l,r)=>p('/api/motor',{l:l,r:r});"
-"const s=()=>p('/api/stop',{});"
-"const v=a=>p('/api/servo',{angle:+a});"
+"const d=dir=>{const s=+document.getElementById('sp').value;p('/api/motor',{l:dir*s,r:0});};"
+"const stop=()=>p('/api/stop',{});"
+"const v=a=>{const n=+a;document.getElementById('sl').value=n;document.getElementById('angle').textContent=n;p('/api/servo',{angle:n});};"
 "const c=h=>{"
 "const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);"
 "p('/api/led',{r:r,g:g,b:b});};"

@@ -2165,6 +2165,9 @@ void app_main(void)
 
     led_init(PIN_LED_WS2812);
     servo_init(PIN_SERVO_S1);
+    /* Steering wheels centered at boot so the rover starts pointed
+     * straight ahead regardless of the servo's last position. */
+    servo_set_deg(90);
 
     /* A1/A2 are the expansion board's I2C bus, NOT motor PWM pins.
      * motors_init() (LEDC on GPIO 2/1) would corrupt every I2C
