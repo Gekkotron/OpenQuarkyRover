@@ -2054,53 +2054,39 @@ static int cmd_voice_record(int argc, char **argv)
     QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
     if (!q) { free(buf); printf("voice-record: queue alloc failed\n"); return 1; }
 
-    /* Bring the ES8311 codec up FIRST. The stock firmware strings dump
-     * proved the mic is analog going through this codec's ADC (MIC_GAIN_*
-     * enum matches the codec's PGA ladder; ESP-ADF es8311 driver is
-     * referenced directly). LEDC drives MCLK just long enough for the
-     * codec to accept register writes; audio_capture_start_ex then
-     * re-binds MCLK to the I²S peripheral and reads the ADC output on
-     * the codec's I²S DIN (GPIO 10) in the LEFT slot. */
-    ledc_timer_config_t mclk_timer = {
-        .speed_mode      = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_1_BIT,
-        .timer_num       = LEDC_TIMER_2,
-        .freq_hz         = 4096000,   /* 4.096 MHz = 16000 * 256 (mclk_multiple), matches ES8311 config */
-        .clk_cfg         = LEDC_AUTO_CLK,
-    };
-    (void)ledc_timer_config(&mclk_timer);
-    ledc_channel_config_t mclk_ch = {
-        .gpio_num   = ES8311_I2S_MCLK,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel    = LEDC_CHANNEL_3,
-        .timer_sel  = LEDC_TIMER_2,
-        .duty       = 1,
-        .hpoint     = 0,
-    };
-    (void)ledc_channel_config(&mclk_ch);
-    bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
-    esp_err_t codec_r = es8311_init();
-    printf("voice-record: es8311_init -> %s\n", esp_err_to_name(codec_r));
-    /* Dump the codec's control registers right after init so an all-zero
-     * / all-0xFFFF capture can be diagnosed without a separate REPL step.
-     * Compare against ADF's es8311_codec_init expected values. */
-    es8311_dump();
-    /* Let any codec GPO settle before starting the I²S RX path. */
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    /* Slot selected above from argv (default RIGHT, override L via arg).
-     * Pass .din_gpio=0 so audio_capture uses its ES8311_I2S_DIN default. */
+    /* Order matters — this is the reverse of what the previous WIP did:
+     *
+     *   1. Start I²S RX FIRST so MCLK/BCLK/LRCK are all coming from the
+     *      same I²S peripheral clock tree (matches stock, which drives
+     *      MCLK via OUT_SEL[GPIO 45] = 23 = I2S0_MCLK_OUT). Without this
+     *      the codec's PLL sees MCLK from LEDC and BCLK from I²S — two
+     *      independent clock domains, no phase lock, and its REG 0x0D
+     *      "clocks detected" bit refuses to leave 0x01 → SDPOUT stays
+     *      digital zero regardless of everything else being correct.
+     *
+     *   2. Init the codec AFTER I²S is running so the ADC's decimator
+     *      configures itself against a stable, phase-locked MCLK.
+     *
+     *   3. Drain the pre-init frames from the queue (all zeros because
+     *      the codec hadn't started driving SDPOUT yet) before capture. */
     audio_capture_config_t cfg = { .slot = slot };
     esp_err_t r = audio_capture_start_ex(q, &cfg);
     if (r != ESP_OK) {
         printf("voice-record: audio_capture_start -> %s\n", esp_err_to_name(r));
         vQueueDelete(q); free(buf); return 1;
     }
-    /* Second dump — AFTER I²S RX is running. If I²S start-up silently
-     * disturbs the codec (bad clock hand-over, GPIO conflict on MCLK,
-     * etc.) the register values will differ from the first dump. */
+    /* Give the I²S peripheral a few ms to lock and start producing
+     * MCLK/BCLK/LRCK before the codec sees them. */
     vTaskDelay(pdMS_TO_TICKS(20));
-    printf("voice-record: ES8311 state AFTER audio_capture_start_ex:\n");
+
+    bb_init(ES8311_I2C_SDA, ES8311_I2C_SCL);
+    esp_err_t codec_r = es8311_init();
+    printf("voice-record: es8311_init -> %s\n", esp_err_to_name(codec_r));
+    /* Codec should now report REG 0x0D = 0x02 (clocks detected) after a
+     * short PLL-lock delay. If it's still 0x01, the phase-lock story is
+     * still wrong. */
+    vTaskDelay(pdMS_TO_TICKS(80));
+    printf("voice-record: ES8311 state AFTER es8311_init + I²S running:\n");
     es8311_dump();
     /* Digital MEMS mic settles within a few LRCK edges. Drop the first
      * few frames (128 ms) — INMP441-family mics need ~50 ms after WS

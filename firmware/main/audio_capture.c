@@ -73,18 +73,19 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
     if (slot == AUDIO_CAPTURE_SLOT_LEFT)  slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     if (slot == AUDIO_CAPTURE_SLOT_RIGHT) slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
 
-    /* MCLK for the ES8311 stays on GPIO 16 driven by the LEDC hack in
-     * cmd_es_init / cmd_voice_record. Not routed through I²S here on
-     * purpose: letting I²S rebind GPIO 16 after the codec is already
-     * initialised glitches MCLK during the hand-over and the codec's
-     * ADC decimator can lose lock. Give the pin to LEDC (which has been
-     * driving MCLK since before es8311_init ran) and only borrow
-     * BCLK/LRCK/DIN. */
+    /* MCLK driven by the I²S peripheral itself on ES8311_I2S_MCLK. Stock
+     * does the same (live-verified: OUT_SEL[GPIO 45] = 23 = I2S0_MCLK).
+     * The earlier LEDC-driven MCLK left the codec's PLL unable to lock
+     * because MCLK and BCLK came from independent clock domains — the
+     * codec's REG 0x0D "clocks detected" bit stayed 0x01 (should be
+     * 0x02) and SDPOUT was gated to digital zero. Sharing the I²S
+     * peripheral clock tree keeps MCLK/BCLK/LRCK phase-locked, which
+     * the ES8311's decimator requires. */
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(16000),
         .slot_cfg = slot_cfg,
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
+            .mclk = ES8311_I2S_MCLK,
             .bclk = bclk_pin,
             .ws   = ws_pin,
             .dout = I2S_GPIO_UNUSED,        /* RX-only path */
@@ -106,7 +107,7 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
         s_rx_chan = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "capture started (16 kHz mono s16le, MCLK=LEDC@GPIO%d "
+    ESP_LOGI(TAG, "capture started (16 kHz mono s16le, MCLK=I2S@GPIO%d "
                   "BCLK=GPIO%d WS=GPIO%d DIN=GPIO%d slot=%s)",
              ES8311_I2S_MCLK, bclk_pin, ws_pin, din_pin,
              slot == AUDIO_CAPTURE_SLOT_LEFT ? "L" :
