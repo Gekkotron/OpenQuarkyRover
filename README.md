@@ -240,7 +240,7 @@ Extracted from the `vfs` partition. Highlights:
 | **ES8311 I²S WS / LRCK** | **GPIO39** | Live-verified: `OUT_SEL[39]` = signal 24 (`I2S0O_WS_OUT_IDX`) |
 | **ES8311 I²S DIN** (mic → ESP32) | **GPIO3** | Live-verified: `IN_SEL` signal 25 (`I2S0I_SD_IN_IDX`) sourced from GPIO 3. ⚠ Strapping pin — codec must hold SDPOUT Hi-Z until boot completes |
 | **ES8311 I²S DOUT** (ESP32 → codec DAC) | **GPIO15** | Live-verified: `OUT_SEL[15]` = signal 25 (`I2S0O_SD_OUT_IDX`). Used by M4 speaker path |
-| **Speaker PA_EN** | **GPIO47** | Active-HIGH; per project memory. Not a peripheral-matrix pin, so verify via `GPIO_OUT1_REG` bit 15 (47 - 32 = 15) — todo |
+| **Speaker PA_EN** | **GPIO47** | Live-verified: `GPIO_OUT1_REG` bit 15 = 1 and `GPIO_ENABLE1_REG` bit 15 = 1 on the stock idle. Active-HIGH; held HIGH continuously across play/pause. Pull LOW to mute the class-D amp behind DOUT |
 
 The audio pin map was live-captured on 2026-09-07 by reflashing the
 stock firmware, driving `intellioAudio.test_timed_record()` from the
