@@ -2584,6 +2584,20 @@ static esp_err_t pdm_capture(int clk_gpio, int dat_gpio, int ms, pdm_stats_t *ou
     return ESP_OK;
 }
 
+static int cmd_gpio_set(int argc, char **argv)
+{
+    if (argc != 3) { printf("usage: gpio-set <pin> <0|1>\n"); return 1; }
+    int pin   = atoi(argv[1]);
+    int level = atoi(argv[2]);
+    if (pin < 0 || pin > 48) { printf("pin out of range\n"); return 1; }
+    if (level != 0 && level != 1) { printf("level must be 0 or 1\n"); return 1; }
+    gpio_reset_pin(pin);
+    gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(pin, level);
+    printf("GPIO%d = %d (held until next reset or gpio-set)\n", pin, level);
+    return 0;
+}
+
 static int cmd_pdm_probe(int argc, char **argv)
 {
     if (argc < 3) {
@@ -2643,6 +2657,20 @@ static int cmd_pdm_scan(int argc, char **argv)
 
     int fixed_clk = (argc >= 3) ? atoi(argv[2]) : -1;
 
+    /* Optional mic-enable pin: `pdm-scan [ms] [fixed_clk] [en_gpio]`.
+     * Held HIGH throughout the whole scan and excluded from CLK/DAT
+     * roles. Lets us test hypotheses like "GPIO 38 gates mic VDD"
+     * without letting the scan itself toggle that pin. */
+    int en_gpio = (argc >= 4) ? atoi(argv[3]) : -1;
+    if (en_gpio >= 0) {
+        gpio_reset_pin(en_gpio);
+        gpio_set_direction(en_gpio, GPIO_MODE_OUTPUT);
+        gpio_set_level(en_gpio, 1);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        printf("pdm-scan: holding GPIO%d HIGH as mic-enable throughout scan\n",
+               en_gpio);
+    }
+
     printf("pdm-scan: %d candidate pins, %d ms per probe (settle 50 ms)\n",
            (int)PDM_CANDIDATES_N, ms);
     printf("      keep talking / making noise near the mic during the run;\n");
@@ -2657,6 +2685,7 @@ static int cmd_pdm_scan(int argc, char **argv)
     for (size_t i = 0; i < PDM_CANDIDATES_N; i++) {
         int clk = PDM_CANDIDATES[i];
         if (fixed_clk >= 0 && clk != fixed_clk) continue;
+        if (clk == en_gpio) continue;   /* enable pin — don't repurpose */
 
         int clk_hits = 0, clk_errors = 0;
         printf("clk=%2d: ", clk);
@@ -2665,6 +2694,7 @@ static int cmd_pdm_scan(int argc, char **argv)
         for (size_t j = 0; j < PDM_CANDIDATES_N; j++) {
             if (i == j) continue;
             int dat = PDM_CANDIDATES[j];
+            if (dat == en_gpio) continue; /* enable pin — don't repurpose */
 
             pdm_stats_t st = {0};
             esp_err_t e = pdm_capture(clk, dat, ms, &st);
@@ -2745,7 +2775,8 @@ static void register_commands(void)
         { .command = "mic-enable-scan",   .help = "M3 diagnostic: drive each of 21 candidate GPIOs HIGH (or LOW with `mic-enable-scan 0`) and record via the ES8311 path to find the pin that ungates the mic (~18 s)", .func = cmd_mic_enable_scan },
         { .command = "pdm-probe",     .help = "M3 mic: test one PDM CLK/DAT pair (PDM hypothesis for MP34DT05/06): pdm-probe <clk> <dat> [ms]",         .func = cmd_pdm_probe },
         { .command = "pdm-watch",     .help = "M3 mic: live PDM RMS every 100 ms — snap fingers to see spike: pdm-watch <clk> <dat> [seconds]",         .func = cmd_pdm_watch },
-        { .command = "pdm-scan",      .help = "M3 mic: brute-force PDM CLK/DAT pairs across free GPIOs: pdm-scan [ms] [fixed_clk]",                     .func = cmd_pdm_scan },
+        { .command = "pdm-scan",      .help = "M3 mic: brute-force PDM CLK/DAT pairs. pdm-scan [ms] [fixed_clk] [en_gpio] — en_gpio (optional) is held HIGH throughout and skipped as CLK/DAT.", .func = cmd_pdm_scan },
+        { .command = "gpio-set",      .help = "hold one GPIO HIGH/LOW as output: gpio-set <pin> <0|1>", .func = cmd_gpio_set },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); ++i) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
