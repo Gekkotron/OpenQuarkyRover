@@ -1335,9 +1335,12 @@ void app_main(void)
     servo_set_deg(90);
 
     /* Bit-bang I²C TLC59108 init — the working motor-driver path on this
-     * board. Without this the web UI's /api/motor endpoint returns 503
-     * "motor driver not ready". Failure is non-fatal so the REPL and UI
-     * still come up for LED/servo control. */
+     * board. bb_init() configures the internal pull-ups on SDA/SCL and
+     * idles both lines high; without it the first START-condition edge
+     * on the wire is undefined and the TLC59108 NAKs the address byte.
+     * Failure is non-fatal so the REPL and UI still come up for
+     * LED/servo control. */
+    bb_init(PIN_I2C_SDA, PIN_I2C_SCL);
     if (bb_tlc59108_init_seq(PIN_I2C_SDA, PIN_I2C_SCL)) {
         ESP_LOGI(TAG, "bit-bang TLC59108 online — motors ready");
     } else {
