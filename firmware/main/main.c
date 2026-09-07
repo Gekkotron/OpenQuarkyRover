@@ -1026,9 +1026,28 @@ static uint8_t ledout0_for_motors(int m1_signed, int m2_signed)
 }
 
 /* Public shim for http_control.c — 0 on ok, -1 if the bit-bang TLC path
- * hasn't been initialised (bb-tlc-init at boot or via REPL). */
+ * hasn't been initialised (bb-tlc-init at boot or via REPL).
+ *
+ * Also inserts a brake pulse when the sign of either motor flips
+ * (forward -> reverse or vice versa). Without it the H-bridge slams
+ * the motor's spinning back-EMF into the opposite rail; the current
+ * inrush sags the battery below the ESP32-S3 brown-out threshold and
+ * the board resets mid-drive. 150 ms of "both inputs low" lets the
+ * motor spin down before the reverse direction is applied — no more
+ * brown-outs from tap-forward-then-tap-back. */
 int bb_motor_set_public(int m1_signed, int m2_signed)
 {
+    static int s_last_m1 = 0;
+    static int s_last_m2 = 0;
+    bool sign_flip =
+        (s_last_m1 != 0 && m1_signed != 0 && ((s_last_m1 < 0) != (m1_signed < 0))) ||
+        (s_last_m2 != 0 && m2_signed != 0 && ((s_last_m2 < 0) != (m2_signed < 0)));
+    if (sign_flip) {
+        (void)bb_motor_set(0, 0);
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+    s_last_m1 = m1_signed;
+    s_last_m2 = m2_signed;
     return bb_motor_set(m1_signed, m2_signed) ? 0 : -1;
 }
 
