@@ -2025,21 +2025,18 @@ static int cmd_es_dump(int argc, char **argv)
 static int cmd_voice_record(int argc, char **argv)
 {
     if (argc < 2 || argc > 3) {
-        printf("usage: voice-record <sec 1..10> [slot=L|R]  (default: R)\n");
+        printf("usage: voice-record <sec 1..10> [slot=L|R|B]  (default: R; B=both/stereo diag)\n");
         return 1;
     }
     int sec = atoi(argv[1]);
     if (sec < 1 || sec > 10) { printf("range: 1..10\n"); return 1; }
 
-    /* Slot: default R (empirical — LEFT gave all zeros on this board, so
-     * the ES8311 stock init routes ADC data to the RIGHT slot here even
-     * though REG44=0x58 nominally selects internal ADCL). Override with
-     * `voice-record <sec> L` to test LEFT again. */
     audio_capture_slot_t slot = AUDIO_CAPTURE_SLOT_RIGHT;
     if (argc == 3) {
         if      (argv[2][0] == 'L' || argv[2][0] == 'l') slot = AUDIO_CAPTURE_SLOT_LEFT;
         else if (argv[2][0] == 'R' || argv[2][0] == 'r') slot = AUDIO_CAPTURE_SLOT_RIGHT;
-        else { printf("slot must be L or R\n"); return 1; }
+        else if (argv[2][0] == 'B' || argv[2][0] == 'b') slot = AUDIO_CAPTURE_SLOT_BOTH;
+        else { printf("slot must be L, R, or B\n"); return 1; }
     }
 
     const size_t frames_total = ((size_t)sec * 16000) / AUDIO_CAPTURE_FRAME_SAMPLES;
@@ -2411,6 +2408,13 @@ static int cmd_voice_stats(int argc, char **argv)
     return 0;
 }
 
+static int cmd_audio_diag(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    audio_capture_diag_print();
+    return 0;
+}
+
 /* Publish a synthetic voice command through the bus (bypasses the audio
  * stack). Verifies the whole dispatcher path lands on the motor helper
  * before Task 10 wires MultiNet-EN into the bus for real. Same command
@@ -2755,6 +2759,7 @@ static void register_commands(void)
         { .command = "es-poke",       .help = "M3 codec: write one ES8311 register: es-poke <reg_hex> <val_hex>", .func = cmd_es_poke },
         { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump: voice-record <sec 1..10> [slot=L|R] (default R)", .func = cmd_voice_record },
         { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
+        { .command = "audio-diag",    .help = "M3 diagnostic: print I²S TX/RX-task iteration counts + last return codes", .func = cmd_audio_diag },
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
         { .command = "voice-inject-test", .help = "M3 diagnostic: publish a synthetic voice command through the bus: voice-inject-test <id 1..5>", .func = cmd_voice_inject_test },

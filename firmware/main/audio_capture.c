@@ -20,6 +20,16 @@ static QueueHandle_t     s_queue   = NULL;
 static volatile uint32_t s_dropped = 0;
 static volatile bool     s_running = false;
 
+/* Layer-boundary diagnostics — see audio_capture_diag_print. Non-zero
+ * counters + ESP_OK last-return means the task is looping cleanly; zero
+ * means it never got past its first blocking call. */
+static volatile uint32_t  s_rx_iters   = 0;
+static volatile esp_err_t s_rx_last_r  = ESP_ERR_INVALID_STATE;
+static volatile size_t    s_rx_last_bytes = 0;
+static volatile uint32_t  s_tx_iters   = 0;
+static volatile esp_err_t s_tx_last_r  = ESP_ERR_INVALID_STATE;
+static volatile size_t    s_tx_last_bytes = 0;
+
 /* Producer task: blocking i2s_channel_read → enqueue non-blocking → count
  * drops. Runs on core 1 at high priority so DMA is serviced promptly. */
 static void capture_task(void *arg)
@@ -31,6 +41,9 @@ static void capture_task(void *arg)
     while (s_running) {
         esp_err_t r = i2s_channel_read(s_rx_chan, frame, sizeof frame,
                                        &bytes_read, pdMS_TO_TICKS(200));
+        s_rx_iters++;
+        s_rx_last_r = r;
+        s_rx_last_bytes = bytes_read;
         if (r != ESP_OK || bytes_read != sizeof frame) continue;
         if (xQueueSend(s_queue, frame, 0) != pdTRUE) s_dropped++;
     }
@@ -48,8 +61,11 @@ static void tx_silence_task(void *arg)
     int16_t silence[AUDIO_CAPTURE_FRAME_SAMPLES] = {0};
     size_t written = 0;
     while (s_running) {
-        (void)i2s_channel_write(s_tx_chan, silence, sizeof silence,
-                                &written, pdMS_TO_TICKS(200));
+        esp_err_t r = i2s_channel_write(s_tx_chan, silence, sizeof silence,
+                                        &written, pdMS_TO_TICKS(200));
+        s_tx_iters++;
+        s_tx_last_r = r;
+        s_tx_last_bytes = written;
     }
     vTaskDelete(NULL);
 }
@@ -98,6 +114,19 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
         I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode);
     if (slot == AUDIO_CAPTURE_SLOT_LEFT)  slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     if (slot == AUDIO_CAPTURE_SLOT_RIGHT) slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
+
+    /* Keep the standard 32-BCLK-per-LRCK frame timing even in mono mode.
+     * With slot_bit_width = AUTO in mono, ESP-IDF halves BCLK to 16 clocks
+     * per LRCK — but the ES8311 in "16-bit I²S standard" mode (REG09/0A =
+     * 0x0C) expects the classic 32 BCLK per LRCK (16 bits L + 16 bits R).
+     * Under the halved framing the codec sees an incomplete cycle and
+     * outputs bit-exact zero on SDPOUT. Live-confirmed: mono LEFT/RIGHT
+     * both read zeros while stereo mode reads real audio on the LEFT
+     * slot only. Forcing 32-bit slot width restores the correct framing
+     * without paying the stereo mode's 2× DMA / RAM cost. */
+    if (slot_mode == I2S_SLOT_MODE_MONO) {
+        slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
+    }
 
     /* MCLK driven by the I²S peripheral itself on ES8311_I2S_MCLK. Stock
      * does the same (live-verified: OUT_SEL[GPIO 45] = 23 = I2S0_MCLK).
@@ -196,3 +225,17 @@ esp_err_t audio_capture_stop(void)
 }
 
 uint32_t audio_capture_dropped_frames(void) { return s_dropped; }
+
+void audio_capture_diag_print(void)
+{
+    printf("audio-diag: running=%d\n", (int)s_running);
+    printf("  RX task: iters=%lu  last_r=%s  last_bytes=%zu\n",
+           (unsigned long)s_rx_iters,
+           esp_err_to_name(s_rx_last_r),
+           s_rx_last_bytes);
+    printf("  TX task: iters=%lu  last_r=%s  last_bytes=%zu\n",
+           (unsigned long)s_tx_iters,
+           esp_err_to_name(s_tx_last_r),
+           s_tx_last_bytes);
+    printf("  dropped_frames=%lu\n", (unsigned long)s_dropped);
+}

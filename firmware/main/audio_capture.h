@@ -77,3 +77,10 @@ esp_err_t audio_capture_stop(void);
  * every audio_capture_start.
  */
 uint32_t audio_capture_dropped_frames(void);
+
+/*
+ * Print current I²S TX/RX-task iteration counts and last-call return codes
+ * so a REPL user can locate which side stalled. Zero counts mean the task
+ * never got past its first blocking call.
+ */
+void audio_capture_diag_print(void);

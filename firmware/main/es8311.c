@@ -151,11 +151,11 @@ esp_err_t es8311_init(void)
     TRY(w(ES8311_SYSTEM_REG0E, 0x02));       /* enable ADC block */
     TRY(w(ES8311_SYSTEM_REG12, 0x00));
     TRY(w(ES8311_SYSTEM_REG14, 0x1A));       /* DMIC=0 (analog), PGA gain select */
-    TRY(w(ES8311_SYSTEM_REG0D, 0x01));       /* system power up */
+    TRY(w(ES8311_SYSTEM_REG0D, 0x01));       /* system power up (ADF canonical) */
     TRY(w(ES8311_ADC_REG15,    0x40));       /* ADC ramp rate */
     TRY(w(ES8311_DAC_REG37,    0x08));       /* DAC ramp (ADF sets even for ADC-only) */
     TRY(w(ES8311_GP_REG45,     0x00));
-    TRY(w(ES8311_GPIO_REG44,   0x58));       /* internal reference: ADCL + DACR */
+    TRY(w(ES8311_GPIO_REG44,   0x50));       /* ADC path routing — stock (working) uses 0x50; ADF's 0x58 sets bit 3 which appears to gate the ADC output on this specific codec revision */
 
     return ESP_OK;
 }
