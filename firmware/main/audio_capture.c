@@ -38,6 +38,22 @@ static void capture_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* TX-silence task: writes zeros to TX so its DMA has data to move. On
+ * ESP32-S3 in full-duplex master the TX clock generator is what drives
+ * BCLK/WS on the pins — if TX DMA is dry, empirically the shared clock
+ * tree stalls and RX DMA never advances. Keep the FIFO fed. */
+static void tx_silence_task(void *arg)
+{
+    (void)arg;
+    int16_t silence[AUDIO_CAPTURE_FRAME_SAMPLES] = {0};
+    size_t written = 0;
+    while (s_running) {
+        (void)i2s_channel_write(s_tx_chan, silence, sizeof silence,
+                                &written, pdMS_TO_TICKS(200));
+    }
+    vTaskDelete(NULL);
+}
+
 esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
                                  const audio_capture_config_t *cfg)
 {
@@ -107,15 +123,31 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
     /* Full-duplex: init and enable TX too. On ESP32-S3 the TX-side clock
      * generator is what physically produces BCLK/WS on the pins in
      * full-duplex master mode — so TX must be configured (and enabled)
-     * even though we never write to it, or BCLK/WS stay dead and the
-     * RX DMA never advances. Both directions share the same std_cfg so
-     * they use the same clock tree and pin bindings. */
+     * even though we never write real audio to it, or BCLK/WS stay dead
+     * and the RX DMA never advances. Both directions share the same
+     * std_cfg so they use the same clock tree and pin bindings. */
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_tx_chan, &std_cfg), TAG, "init tx std");
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx_chan, &std_cfg), TAG, "init rx std");
+
+    /* Preload silence into TX DMA before enabling so the peripheral has
+     * something to shift out from the very first BCLK tick. Empirically
+     * TX with an empty FIFO seems to pause clocks on this SoC. */
+    static int16_t preload_silence[AUDIO_CAPTURE_FRAME_SAMPLES * 4] = {0};
+    size_t preloaded = 0;
+    (void)i2s_channel_preload_data(s_tx_chan, preload_silence,
+                                   sizeof preload_silence, &preloaded);
+
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx_chan), TAG, "enable tx");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx_chan), TAG, "enable rx");
 
     s_running = true;
+
+    /* Background writer that keeps TX DMA fed with silence (see the
+     * task comment above). Starts BEFORE capture so clocks are already
+     * flowing when we start reading. */
+    (void)xTaskCreatePinnedToCore(tx_silence_task, "aud_tx0", 4096, NULL,
+                                  21, NULL, 1);
+
     BaseType_t ok = xTaskCreatePinnedToCore(capture_task, "aud_cap", 4096, NULL,
                                             22, &s_task, 1);
     if (ok != pdPASS) {
