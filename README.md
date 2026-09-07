@@ -241,6 +241,13 @@ Extracted from the `vfs` partition. Highlights:
 | **ES8311 I²S DIN** (mic → ESP32) | **GPIO3** | Live-verified: `IN_SEL` signal 25 (`I2S0I_SD_IN_IDX`) sourced from GPIO 3. ⚠ Strapping pin — codec must hold SDPOUT Hi-Z until boot completes |
 | **ES8311 I²S DOUT** (ESP32 → codec DAC) | **GPIO15** | Live-verified: `OUT_SEL[15]` = signal 25 (`I2S0O_SD_OUT_IDX`). Used by M4 speaker path |
 | **Speaker PA_EN** | **GPIO47** | Live-verified: `GPIO_OUT1_REG` bit 15 = 1 and `GPIO_ENABLE1_REG` bit 15 = 1 on the stock idle. Active-HIGH; held HIGH continuously across play/pause. Pull LOW to mute the class-D amp behind DOUT |
+| **OV5640 XCLK** (ESP32 → sensor) | **GPIO14** | Live-verified: `OUT_SEL[14]` = signal 149 (`CAM_CLK_IDX`). Driven by LEDC at 20 MHz by esp32-camera |
+| **OV5640 PCLK** (sensor → ESP32) | **GPIO11** | Live-verified: `IN_SEL` signal 149 (`CAM_PCLK_IDX`) sourced from GPIO 11 |
+| **OV5640 VSYNC** | **GPIO38** | Live-verified: `IN_SEL` signal 152 |
+| **OV5640 HREF** | **GPIO16** | Live-verified: `IN_SEL` signal 150. HSYNC unused on this board |
+| **OV5640 D0..D7** | **9, 19, 8, 20, 10, 12, 13, 21** | Live-verified: `IN_SEL` signals 133..140 |
+| **OV5640 SCCB SDA / SCL** | **GPIO17 / GPIO18** | Shares the I²C bus with ES8311. Camera at 0x3C, codec at 0x18 — no address collision |
+| **OV5640 PWDN / RESET** | *not wired* | No `OUT_SEL` binding observed under stock; esp32-camera passes -1 |
 
 The audio pin map was live-captured on 2026-09-07 by reflashing the
 stock firmware, driving `intellioAudio.test_timed_record()` from the

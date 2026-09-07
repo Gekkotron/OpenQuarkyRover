@@ -102,3 +102,21 @@
 /* --- Servo PWM config ------------------------------------------------- */
 #define SERVO_PWM_FREQ_HZ   50
 #define SERVO_PWM_RES_BITS  14      /* ~1.22 µs resolution per LSB */
+
+/* --- OV5640 camera (DVP parallel) — CONFIRMED via live-capture -------
+ *
+ * Live-verified against the stock firmware's active GPIO matrix (see
+ * README "How we resolved the audio pin map" — same mem32 technique
+ * applied to CAM_* signal indices 133..152 and OUT_SEL for CAM_CLK).
+ *
+ *   XCLK   ESP32 → sensor        GPIO 14   (OUT_SEL[14] = sig 149)
+ *   PCLK   sensor → ESP32        GPIO 11
+ *   VSYNC  sensor → ESP32        GPIO 38
+ *   HREF   sensor → ESP32        GPIO 16   (HSYNC is unused on this board)
+ *   D0..D7 sensor → ESP32        9,19,8,20,10,12,13,21
+ *   SCCB   shared I²C w/ ES8311  SDA=17  SCL=18
+ *   PWDN, RESET                  not wired on this board
+ *
+ * The concrete #defines live in camera.c so the esp32-camera driver
+ * config stays adjacent to its usage. This block is for cross-reference
+ * with the pin-map table in the README. */

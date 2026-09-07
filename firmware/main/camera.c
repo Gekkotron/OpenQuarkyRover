@@ -6,26 +6,34 @@
 static const char *TAG = "cam";
 
 /* ============================================================
- *  PLACEHOLDER PIN VALUES — update after live-capture on stock
- *  (see camera.h). Guessing at a stock ESP32-S3-CAM layout so
- *  the code compiles; DO NOT EXPECT IMAGES until the real pins
- *  are known and pasted here.
+ *  Live-verified from stock firmware (2026-09-07) by reading
+ *  GPIO_FUNCn_IN_SEL_CFG / OUT_SEL_CFG registers while the OV5640
+ *  was already initialised. Decoded against
+ *  esp32s3/soc/gpio_sig_map.h:
+ *    IN_SEL[149] CAM_PCLK  <- GPIO 11
+ *    IN_SEL[150] CAM_HREF  <- GPIO 16
+ *    IN_SEL[152] CAM_VSYNC <- GPIO 38    (no HSYNC binding used)
+ *    IN_SEL[133..140] D0..D7 <- 9,19,8,20,10,12,13,21
+ *    IN_SEL[89/90] I²C0 SCL/SDA <- 18/17 (SCCB shares the ES8311 bus)
+ *    OUT_SEL[14] = sig 149 (CAM_CLK)  → XCLK on GPIO 14
+ *  PWDN and RESET are not connected on this board (no OUT_SEL binding
+ *  observed, so -1 tells esp_camera_init to skip them).
  * ============================================================ */
-#define PIN_CAM_XCLK       15
-#define PIN_CAM_PCLK       13
-#define PIN_CAM_VSYNC       6
-#define PIN_CAM_HREF        7
-#define PIN_CAM_SDA         4    /* SCCB — separate from ES8311 I²C */
-#define PIN_CAM_SCL         5
-#define PIN_CAM_D0         11
-#define PIN_CAM_D1          9
+#define PIN_CAM_XCLK       14
+#define PIN_CAM_PCLK       11
+#define PIN_CAM_VSYNC      38
+#define PIN_CAM_HREF       16
+#define PIN_CAM_SDA        17    /* SCCB shares GPIO 17/18 with the ES8311 I²C bus */
+#define PIN_CAM_SCL        18
+#define PIN_CAM_D0          9
+#define PIN_CAM_D1         19
 #define PIN_CAM_D2          8
-#define PIN_CAM_D3         10
-#define PIN_CAM_D4         12
-#define PIN_CAM_D5         18
-#define PIN_CAM_D6         17
-#define PIN_CAM_D7         16
-#define PIN_CAM_PWDN       -1    /* not connected on many S3 boards */
+#define PIN_CAM_D3         20
+#define PIN_CAM_D4         10
+#define PIN_CAM_D5         12
+#define PIN_CAM_D6         13
+#define PIN_CAM_D7         21
+#define PIN_CAM_PWDN       -1    /* not wired on the Quarky */
 #define PIN_CAM_RESET      -1
 
 esp_err_t camera_start(void)
