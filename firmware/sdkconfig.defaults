@@ -34,7 +34,8 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# esp-sr WakeNet: only the English "Hi ESP" wake word. Every other
-# wake-word / MultiNet / VAD model stays at Kconfig default (off), so
-# the packed srmodels.bin is small (~130 KB).
+# esp-sr WakeNet: English "Hi ESP" wake word.
+# esp-sr MultiNet7 English (quantized) for post-wake command recognition.
+# Other wake words and VAD stay at defaults; srmodels.bin ends up ~1 MB.
 CONFIG_SR_WN_WN9_HIESP=y
+CONFIG_SR_MN_EN_MULTINET7_QUANT=y

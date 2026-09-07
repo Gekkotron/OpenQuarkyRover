@@ -15,4 +15,4 @@
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     ,        0x1000,
 factory,  app,  factory, ,        4M,
-model,    data, ,        ,        2M,
+model,    data, ,        ,        4M,
