@@ -233,6 +233,23 @@ Extracted from the `vfs` partition. Highlights:
 | On-board servo `S1` | **GPIO0** | Multimeter-confirmed; strapping pin, must idle HIGH at reset |
 | On-board buttons (L + R, shared ADC) | **GPIO7** | Resistor-ladder; ADC1 ch 6 |
 | On-board RGB LED (WS2812B) | **GPIO48** | Verified against the M1 test firmware |
+| **ES8311 I²C SDA** (codec control) | **GPIO17** | Live-verified: `IN_SEL` signal 90 (`I2CEXT0_SDA_IN_IDX`) sourced from GPIO 17 |
+| **ES8311 I²C SCL** (codec control) | **GPIO18** | Live-verified: `IN_SEL` signal 89 (`I2CEXT0_SCL_IN_IDX`) sourced from GPIO 18 |
+| **ES8311 I²S MCLK** | **GPIO45** | Live-verified: `OUT_SEL[45]` = signal 23 (`I2S0_MCLK_OUT_IDX`) |
+| **ES8311 I²S BCLK** | **GPIO46** | Live-verified: `OUT_SEL[46]` = signal 22 (`I2S0O_BCK_OUT_IDX`) |
+| **ES8311 I²S WS / LRCK** | **GPIO39** | Live-verified: `OUT_SEL[39]` = signal 24 (`I2S0O_WS_OUT_IDX`) |
+| **ES8311 I²S DIN** (mic → ESP32) | **GPIO3** | Live-verified: `IN_SEL` signal 25 (`I2S0I_SD_IN_IDX`) sourced from GPIO 3. ⚠ Strapping pin — codec must hold SDPOUT Hi-Z until boot completes |
+| **ES8311 I²S DOUT** (ESP32 → codec DAC) | **GPIO15** | Live-verified: `OUT_SEL[15]` = signal 25 (`I2S0O_SD_OUT_IDX`). Used by M4 speaker path |
+| **Speaker PA_EN** | **GPIO47** | Active-HIGH; per project memory. Not a peripheral-matrix pin, so verify via `GPIO_OUT1_REG` bit 15 (47 - 32 = 15) — todo |
+
+The audio pin map was live-captured on 2026-09-07 by reflashing the
+stock firmware, driving `intellioAudio.test_timed_record()` from the
+MicroPython REPL to bring the codec's I²S up, and reading
+`GPIO_FUNCn_IN_SEL_CFG` / `GPIO_FUNCn_OUT_SEL_CFG` at
+`0x60004154` / `0x60004554` via `machine.mem32[...]`. Signal indices
+decoded against `esp32s3/soc/gpio_sig_map.h`. The earlier assumption
+that the board was a Korvo-2 v3 clone was falsified — the codec chip
+and its I²C pins match, but every I²S pin differs.
 
 **Button ladder — measured ADC bands (12-bit, 12 dB atten, ~0..3.1 V full scale):**
 
@@ -252,16 +269,41 @@ threshold-based; there are no gaps between adjacent bands.
 
 **Architecturally inferred** (values unknown, functions certain):
 
-- Internal-only pins to be identified: OV5640 camera bank (~18 pins),
-  ES8311 I²S (BCK, WS, DIN, DOUT) + I²C control, MEMS mic routing.
+- Internal-only pins still to be identified: OV5640 camera bank (~18
+  pins). The stock strings dump proves the camera goes through
+  ESP32-S3 LCD_CAM peripheral signals (`CAM_DATA_IN0..15`,
+  `CAM_PCLK_IDX = 149`, `CAM_HSYNC/VSYNC`); the specific GPIO
+  bindings can be read the same way we did for audio — snap
+  `GPIO_FUNCn_IN_SEL_CFG` at signal indices 133–149 while the
+  camera is streaming on the stock firmware.
 
-**Path to resolve the rest**:
+**How we resolved the audio pin map:**
 
-1. Attempt a live MicroPython REPL introspection on the running stock
-   firmware over USB serial (`import intellioConstants;
-   print(vars(intellioConstants))`) — 5 seconds if REPL is accessible.
-2. Fallback: locate `mp_frozen_mpy_data` inside `factory.bin` and
-   disassemble the `intellioConstants` module with `mpy-tool.py`.
+The audio pins were the first unknown resolved by the live-capture
+technique. Steps that worked, for reference when we do the camera:
+
+1. `esptool write_flash 0x0 quarkyRoverBackup/stock_firmware.bin` to
+   restore the stock image (fully reversible — the backup is a plain
+   16 MB flash dump, SHA-256 anchored).
+2. Open the stock MicroPython REPL over USB serial at 115200. The
+   stock main loop prints `Player status: …` continuously — press
+   `Ctrl-C` a few times to interrupt and reach `>>>`.
+3. `import intellioAudio; intellioAudio.test_timed_record()` — the
+   test function fires the recording path, so the codec's I²S peripheral
+   ends up configured with the real pin bindings even if the record
+   itself auto-stops on missing SD card.
+4. Read the GPIO matrix input/output selector registers with
+   `machine.mem32[0x60004154 + 4*sig]` and
+   `machine.mem32[0x60004554 + 4*gpio]`. Any register whose enable bit
+   is set or whose signal index differs from `SIG_GPIO_OUT_IDX = 256`
+   is bound to a peripheral. Decode signal indices against
+   `esp32s3/soc/gpio_sig_map.h`.
+5. `esptool` again to flash our firmware back — same command, our
+   `.bin` from `firmware/build/`.
+
+Fallback if the REPL ever becomes unreachable: locate
+`mp_frozen_mpy_data` inside `factory.bin` and disassemble
+`intellioConstants` / `intellioAudio` with `mpy-tool.py`.
 
 ---
 
