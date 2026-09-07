@@ -26,6 +26,8 @@
 #include <math.h>
 
 #include "pins.h"
+#include "wifi_softap.h"
+#include "http_control.h"
 
 static const char *TAG = "M1";
 
@@ -114,7 +116,7 @@ static void led_init(int gpio)
     s_led_pin = gpio;
 }
 
-static void led_set(uint8_t r, uint8_t g, uint8_t b)
+void led_set(uint8_t r, uint8_t g, uint8_t b)
 {
     if (!s_led) return;
     led_strip_set_pixel(s_led, 0, r, g, b);
@@ -406,7 +408,7 @@ static void servo_init(int gpio)
     s_servo_pin = gpio;
 }
 
-static void servo_set_deg(int deg)
+void servo_set_deg(int deg)
 {
     if (deg < 0)   deg = 0;
     if (deg > 180) deg = 180;
@@ -1846,6 +1848,13 @@ static uint8_t ledout0_for_motors(int m1_signed, int m2_signed)
     return r;
 }
 
+/* Public shim for http_control.c — 0 on ok, -1 if the bit-bang TLC path
+ * hasn't been initialised (bb-tlc-init at boot or via REPL). */
+int bb_motor_set_public(int m1_signed, int m2_signed)
+{
+    return bb_motor_set(m1_signed, m2_signed) ? 0 : -1;
+}
+
 static bool bb_motor_set(int m1_signed, int m2_signed)
 {
     if (m1_signed < -100) m1_signed = -100;
@@ -2181,8 +2190,24 @@ void app_main(void)
         ESP_LOGW(TAG, "I2C bus init failed — expansion board control disabled");
     }
 
+    /* Bit-bang I²C TLC59108 init — the working motor-driver path on this
+     * board. Without this the web UI's /api/motor endpoint returns 503
+     * "motor driver not ready". Failure is non-fatal so the REPL and UI
+     * still come up for LED/servo control. */
+    if (bb_tlc59108_init_seq(PIN_I2C_SDA, PIN_I2C_SCL)) {
+        ESP_LOGI(TAG, "bit-bang TLC59108 online — motors ready");
+    } else {
+        ESP_LOGW(TAG, "bit-bang TLC59108 init failed — motors disabled until `bb-tlc-init` at REPL");
+    }
+
     /* Boot indicator — green if LED pin happens to be right */
     led_set(0, 32, 0);
+
+    /* Wi-Fi soft-AP + HTTP control UI. Both are non-fatal; the REPL is
+     * the fallback if Wi-Fi doesn't come up. */
+    if (rover_wifi_ap_start() == ESP_OK) {
+        (void)http_control_start();
+    }
 
     esp_console_repl_t              *repl        = NULL;
     esp_console_repl_config_t        repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
