@@ -98,14 +98,22 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
             .mclk = ES8311_I2S_MCLK,
             .bclk = bclk_pin,
             .ws   = ws_pin,
-            .dout = I2S_GPIO_UNUSED,        /* RX-only path */
+            .dout = I2S_GPIO_UNUSED,        /* no playback yet — M4 will wire this */
             .din  = din_pin,
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
 
-    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx_chan, &std_cfg), TAG, "init std");
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx_chan), TAG, "enable");
+    /* Full-duplex: init and enable TX too. On ESP32-S3 the TX-side clock
+     * generator is what physically produces BCLK/WS on the pins in
+     * full-duplex master mode — so TX must be configured (and enabled)
+     * even though we never write to it, or BCLK/WS stay dead and the
+     * RX DMA never advances. Both directions share the same std_cfg so
+     * they use the same clock tree and pin bindings. */
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_tx_chan, &std_cfg), TAG, "init tx std");
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx_chan, &std_cfg), TAG, "init rx std");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx_chan), TAG, "enable tx");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx_chan), TAG, "enable rx");
 
     s_running = true;
     BaseType_t ok = xTaskCreatePinnedToCore(capture_task, "aud_cap", 4096, NULL,
@@ -147,6 +155,7 @@ esp_err_t audio_capture_stop(void)
         s_rx_chan = NULL;
     }
     if (s_tx_chan) {
+        i2s_channel_disable(s_tx_chan);
         i2s_del_channel(s_tx_chan);
         s_tx_chan = NULL;
     }
