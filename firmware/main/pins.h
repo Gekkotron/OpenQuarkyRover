@@ -146,6 +146,14 @@
 #define ES8311_I2S_DIN      3     /* live-verified (in_sel sig 25) — STRAPPING PIN */
 #define ES8311_I2S_DOUT     15    /* live-verified (out_sel sig 25) — for M4 speaker */
 
+/* --- Speaker amplifier enable ----------------------------------------- */
+/* Live-verified 2026-09-07: stock firmware at idle drives GPIO 47 HIGH
+ * with the pin enabled as an output (GPIO_OUT1_REG bit 15 = 1,
+ * GPIO_ENABLE1_REG bit 15 = 1). Held HIGH continuously; not toggled per
+ * play/pause. Active-HIGH — pull LOW to mute the class-D amp behind
+ * the codec's DOUT line. */
+#define PIN_PA_EN           47
+
 #define ES8311_I2C_ADDR     0x18  /* 7-bit; datasheet §Register 0xFD returns 0x83 */
 
 /* --- Legacy "separate digital MEMS mic on 40/41/42" defs (falsified) --
