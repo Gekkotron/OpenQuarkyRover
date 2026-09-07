@@ -47,11 +47,11 @@ static const char INDEX_HTML[] =
 
 "<h2>Drive (M1)</h2>"
 "<div class=\"row\">"
-"<button class=\"btn\" onclick=\"d(+1)\">&uarr;</button>"
+"<button class=\"btn\" onclick=\"d(-1)\">&uarr;</button>"
 "<button class=\"btn stop\" onclick=\"stop()\">&#9632;</button>"
-"<button class=\"btn\" onclick=\"d(-1)\">&darr;</button>"
+"<button class=\"btn\" onclick=\"d(+1)\">&darr;</button>"
 "</div>"
-"<div style=\"margin-top:12px\"><input id=\"sp\" type=\"range\" min=\"0\" max=\"100\" value=\"80\" oninput=\"document.getElementById('spv').textContent=this.value\"></div>"
+"<div style=\"margin-top:12px\"><input id=\"sp\" type=\"range\" min=\"0\" max=\"100\" value=\"80\" oninput=\"onSpeed(this.value)\"></div>"
 "<div>speed: <span id=\"spv\">80</span>%</div>"
 
 "<h2>Steer (servo)</h2>"
@@ -64,13 +64,22 @@ static const char INDEX_HTML[] =
 "<div>angle: <span id=\"angle\">90</span>&deg;</div>"
 
 "<h2>LED</h2>"
+"<div style=\"display:flex;flex-direction:column;align-items:center;gap:10px\">"
 "<input type=\"color\" value=\"#000000\" oninput=\"c(this.value)\">"
-"<button class=\"btn\" style=\"width:auto;height:auto;font-size:1em;padding:8px 16px;margin-left:12px\" onclick=\"c('#000000')\">off</button>"
+"<button class=\"btn\" style=\"width:auto;height:auto;font-size:1em;padding:8px 24px\" onclick=\"c('#000000')\">off</button>"
+"</div>"
 
 "<script>"
 "const p=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});"
-"const d=dir=>{const s=+document.getElementById('sp').value;p('/api/motor',{l:dir*s,r:0});};"
-"const stop=()=>p('/api/stop',{});"
+/* cur is the current motor direction (+1, -1, or 0). send() emits the
+ * current dir × speed slider, so both the F/B buttons AND the speed
+ * slider go through the same path. Speed changes while driving are
+ * applied instantly by resending. */
+"let cur=0;"
+"const send=()=>p('/api/motor',{l:cur*+document.getElementById('sp').value,r:0});"
+"const d=dir=>{cur=dir;send();};"
+"const stop=()=>{cur=0;p('/api/stop',{});};"
+"const onSpeed=v=>{document.getElementById('spv').textContent=v;if(cur!==0)send();};"
 "const v=a=>{const n=+a;document.getElementById('sl').value=n;document.getElementById('angle').textContent=n;p('/api/servo',{angle:n});};"
 "const c=h=>{"
 "const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);"
