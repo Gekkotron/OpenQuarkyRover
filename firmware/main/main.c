@@ -33,6 +33,7 @@
 #include "audio_capture.h"
 #include "command_bus.h"
 #include "led_indicator.h"
+#include "wake_word.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
 
@@ -1677,6 +1678,30 @@ static int cmd_audio_diag(int argc, char **argv)
     return 0;
 }
 
+static int cmd_wake_start(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    esp_err_t r = wake_word_start();
+    printf("wake-start: %s\n", esp_err_to_name(r));
+    if (r == ESP_OK) printf("  say \"Hi ESP\" to trigger a green LED flash\n");
+    return r == ESP_OK ? 0 : 1;
+}
+
+static int cmd_wake_stop(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    esp_err_t r = wake_word_stop();
+    printf("wake-stop: %s\n", esp_err_to_name(r));
+    return r == ESP_OK ? 0 : 1;
+}
+
+static int cmd_wake_diag(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    wake_word_diag_print();
+    return 0;
+}
+
 /* Publish a synthetic voice command through the bus (bypasses the audio
  * stack). Verifies the whole dispatcher path lands on the motor helper
  * before Task 10 wires MultiNet-EN into the bus for real. Same command
@@ -2013,6 +2038,9 @@ static void register_commands(void)
         { .command = "voice-record",  .help = "M3 mic: capture N s of PCM to PSRAM then hex-dump: voice-record <sec 1..10> [slot=L|R] (default R)", .func = cmd_voice_record },
         { .command = "voice-stats",   .help = "M3 diagnostic: print audio_capture dropped-frame count", .func = cmd_voice_stats },
         { .command = "audio-diag",    .help = "M3 diagnostic: print I²S TX/RX-task iteration counts + last return codes", .func = cmd_audio_diag },
+        { .command = "wake-start",    .help = "Start WakeNet \"Hi ESP\" detector on the mic (LED green on detect)", .func = cmd_wake_start },
+        { .command = "wake-stop",     .help = "Stop the wake-word detector and free the audio pipeline",           .func = cmd_wake_stop },
+        { .command = "wake-diag",     .help = "Wake-word detector: iteration counts, last errors, detection total",.func = cmd_wake_diag },
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
         { .command = "voice-inject-test", .help = "M3 diagnostic: publish a synthetic voice command through the bus: voice-inject-test <id 1..5>", .func = cmd_voice_inject_test },
@@ -2096,6 +2124,16 @@ void app_main(void)
     register_commands();
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
 
-    ESP_LOGI(TAG, "REPL ready — try: help, pins, selftest");
+    /* Wake-word ("Hi ESP") detector: starts audio_capture on the mic
+     * and runs WakeNet in the background. On detect, publishes
+     * CMD_VOICE_WAKE + CMD_LED_STATE(OK) to the command bus. Non-fatal
+     * on failure — REPL still comes up so the user can diagnose. */
+    esp_err_t wake_r = wake_word_start();
+    if (wake_r != ESP_OK) {
+        ESP_LOGW(TAG, "wake_word_start: %s — say `wake-start` at the REPL "
+                       "to retry, `wake-diag` to inspect", esp_err_to_name(wake_r));
+    }
+
+    ESP_LOGI(TAG, "REPL ready — try: help, pins, selftest, wake-diag");
     /* app_main returns; the REPL keeps running in its own task. */
 }

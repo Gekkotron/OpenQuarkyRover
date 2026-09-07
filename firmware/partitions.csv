@@ -1,0 +1,18 @@
+# OpenQuarkyRover — custom 16 MB partition table.
+#
+# Reserves a 6 MB "model" partition that esp-sr's CMakeLists.txt looks
+# for by name; when present it auto-packs the selected WakeNet/MultiNet
+# models into build/srmodels/srmodels.bin and adds it to `idf.py flash`.
+# Sized per the esp-sr flash-model doc's default recommendation (models
+# only take ~130 KB for WakeNet Hi ESP, but leaves headroom for later
+# adding MultiNet command sets without repartitioning + reflashing).
+#
+# Factory app grows to 2 MB (was 1.5 MB in SINGLE_APP_LARGE preset) to
+# comfortably fit esp32-camera + wifi + http_server + esp-sr AFE side-
+# by-side without brushing the ceiling.
+#
+# Name,   Type, SubType, Offset,  Size,  Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        4M,
+model,    data, ,        ,        2M,

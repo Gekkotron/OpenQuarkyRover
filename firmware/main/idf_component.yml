@@ -1,4 +1,9 @@
 dependencies:
   espressif/led_strip: "^2.5.0"
   espressif/esp32-camera: "^2.0.15"
+  espressif/esp-sr: "^2.1.0"
+  # Pin esp-dl below 3.3.11 — 3.3.11 introduced MALLOC_CAP_SIMD which
+  # only exists in ESP-IDF ≥ 5.4. We're on ESP-IDF 5.3.2. 3.3.10 still
+  # satisfies esp-sr's ">= 3.3.10" constraint.
+  espressif/esp-dl: "3.3.10"
   idf: ">=5.2.0"

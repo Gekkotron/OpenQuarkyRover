@@ -16,6 +16,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+static const char *TAG = "command_bus";
 #endif
 
 /* --- Handler entry points -------------------------------------------------
@@ -69,6 +70,15 @@ void command_bus_dispatch_one(const command_t *c)
     case CMD_BB_TLC_SET:
         bb_tlc_set_pct(c->as.bb_tlc.channel, c->as.bb_tlc.percent);
         break;
+    case CMD_VOICE_WAKE:
+        /* Signaling event — logged so the bus trace shows wake fired.
+         * MultiNet integration will replace this with a call that opens
+         * the recognition window and transitions the LED to LISTENING. */
+#ifndef COMMAND_BUS_HOST_TEST
+        ESP_LOGI(TAG, "wake fired (src=%d model_idx=%u)",
+                 (int)c->source, (unsigned)c->as.voice_wake.model_index);
+#endif
+        break;
     case CMD_NONE:
     default:
         break;
@@ -79,7 +89,6 @@ void command_bus_dispatch_one(const command_t *c)
  * command_bus_dispatch_one and never links FreeRTOS. */
 #ifndef COMMAND_BUS_HOST_TEST
 
-static const char   *TAG      = "command_bus";
 static QueueHandle_t s_queue  = NULL;
 
 static void dispatcher_task(void *arg)

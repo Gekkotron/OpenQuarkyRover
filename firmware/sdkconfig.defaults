@@ -28,7 +28,13 @@ CONFIG_SPIRAM_TYPE_ESPPSRAM64=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
-# Larger single-app partition — 1 MB default overflows once esp32-camera
-# + jpeg + wifi_provisioning + esp_http_server are pulled in. This preset
-# gives the app 3 MB with the rest reserved for data / user filesystem.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Custom partition table — see firmware/partitions.csv. Reserves a
+# 6 MB "model" partition that esp-sr's CMake auto-flashes with the
+# selected WakeNet/MultiNet models, plus a 2 MB factory app.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# esp-sr WakeNet: only the English "Hi ESP" wake word. Every other
+# wake-word / MultiNet / VAD model stays at Kconfig default (off), so
+# the packed srmodels.bin is small (~130 KB).
+CONFIG_SR_WN_WN9_HIESP=y

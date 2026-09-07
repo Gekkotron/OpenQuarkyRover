@@ -26,6 +26,10 @@ typedef enum {
     CMD_LED_STATE,    /* args: led_state_t          (voice FSM claim)   */
     CMD_SERVO,        /* args: uint8_t channel; uint16_t us             */
     CMD_BB_TLC_SET,   /* args: uint8_t channel, percent                 */
+    CMD_VOICE_WAKE,   /* args: uint8_t model_index                       *
+                       * Emitted by wake_word.c on WAKENET_DETECTED.     *
+                       * No hardware effect yet — MultiNet (later task)  *
+                       * hooks here to open its recognition window.      */
 } command_id_t;
 
 typedef enum { SRC_REPL, SRC_VOICE, SRC_INTERNAL } command_source_t;
@@ -52,6 +56,7 @@ typedef struct {
         struct { led_state_t state;           } led_state;
         struct { uint8_t channel; uint16_t us;} servo;
         struct { uint8_t channel, percent;    } bb_tlc;
+        struct { uint8_t model_index;         } voice_wake;
     } as;
 } command_t;
 
