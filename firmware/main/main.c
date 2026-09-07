@@ -2342,10 +2342,16 @@ static int cmd_mic_enable_scan(int argc, char **argv)
     QueueHandle_t q = xQueueCreate(4, AUDIO_CAPTURE_FRAME_BYTES);
     if (!q) { printf("mic-enable-scan: queue alloc failed\n"); return 1; }
 
+    /* Codec has to be up (init'd + LEDC MCLK running) or the ADC output
+     * stays at bit-zero regardless of any enable pin. Bootstrap it once
+     * up-front so every iteration starts from the same known state. */
+    es_repl_bootstrap();
+    (void)es8311_init();
+
     printf("--- mic-enable-scan: try driving each of %zu candidate GPIOs %s ---\n",
            MIC_ENABLE_CAND_COUNT, level ? "HIGH" : "LOW");
-    printf("    watching for max|s| >> 1 with neg1 < 100 on MIC pins (BCLK=%d WS=%d DIN=%d)\n",
-           MIC_I2S_SCK, MIC_I2S_WS, MIC_I2S_SD);
+    printf("    ES8311 path (BCLK=%d WS=%d DIN=%d slot=R). Non-zero max|s| = hit.\n",
+           ES8311_I2S_BCLK, ES8311_I2S_LRCK, ES8311_I2S_DIN);
 
     int best_max = 0;
     int best_pin = -1;
@@ -2353,13 +2359,19 @@ static int cmd_mic_enable_scan(int argc, char **argv)
 
     for (size_t k = 0; k < MIC_ENABLE_CAND_COUNT; k++) {
         int pin = MIC_ENABLE_CAND[k];
+        /* Skip pins we know are the codec's own I²C / I²S — driving
+         * those as an output would kill the mic path we're testing. */
+        if (pin == ES8311_I2C_SDA || pin == ES8311_I2C_SCL ||
+            pin == ES8311_I2S_MCLK || pin == ES8311_I2S_BCLK ||
+            pin == ES8311_I2S_LRCK || pin == ES8311_I2S_DIN) {
+            continue;
+        }
         gpio_reset_pin(pin);
         gpio_set_direction(pin, GPIO_MODE_OUTPUT);
         gpio_set_level(pin, level);
         vTaskDelay(pdMS_TO_TICKS(200));
 
-        audio_capture_config_t cfg = { .din_gpio = MIC_I2S_SD,
-                                       .slot = AUDIO_CAPTURE_SLOT_RIGHT };
+        audio_capture_config_t cfg = { .slot = AUDIO_CAPTURE_SLOT_RIGHT };
         if (audio_capture_start_ex(q, &cfg) != ESP_OK) {
             gpio_set_level(pin, 0);
             gpio_set_direction(pin, GPIO_MODE_INPUT);
@@ -2730,7 +2742,7 @@ static void register_commands(void)
         { .command = "voice-scan",    .help = "M3 diagnostic: sweep I2S DIN candidate GPIOs × slot L/R and report max|sample| (~18 s)", .func = cmd_voice_scan },
         { .command = "mic-perm",      .help = "M3 diagnostic: try all 6 permutations of GPIOs 40/41/42 as (BCLK,WS,DIN) × slot L/R (~5 s)", .func = cmd_mic_perm },
         { .command = "voice-inject-test", .help = "M3 diagnostic: publish a synthetic voice command through the bus: voice-inject-test <id 1..5>", .func = cmd_voice_inject_test },
-        { .command = "mic-enable-scan",   .help = "M3 diagnostic: sweep 21 candidate GPIOs, drive each HIGH, and look for the pin that ungates the mic (~18 s)", .func = cmd_mic_enable_scan },
+        { .command = "mic-enable-scan",   .help = "M3 diagnostic: drive each of 21 candidate GPIOs HIGH (or LOW with `mic-enable-scan 0`) and record via the ES8311 path to find the pin that ungates the mic (~18 s)", .func = cmd_mic_enable_scan },
         { .command = "pdm-probe",     .help = "M3 mic: test one PDM CLK/DAT pair (PDM hypothesis for MP34DT05/06): pdm-probe <clk> <dat> [ms]",         .func = cmd_pdm_probe },
         { .command = "pdm-watch",     .help = "M3 mic: live PDM RMS every 100 ms — snap fingers to see spike: pdm-watch <clk> <dat> [seconds]",         .func = cmd_pdm_watch },
         { .command = "pdm-scan",      .help = "M3 mic: brute-force PDM CLK/DAT pairs across free GPIOs: pdm-scan [ms] [fixed_clk]",                     .func = cmd_pdm_scan },
