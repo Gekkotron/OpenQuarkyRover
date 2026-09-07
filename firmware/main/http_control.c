@@ -46,12 +46,13 @@ static const char INDEX_HTML[] =
 "</style></head><body>"
 "<h1>OpenQuarkyRover</h1>"
 
-"<img id=\"cam\" src=\"/stream\" alt=\"camera\" "
+"<img id=\"cam\" alt=\"camera\" "
 "onerror=\"this.style.display='none';document.getElementById('camerr').style.display='block'\" "
 "style=\"max-width:100%;max-height:50vh;border-radius:12px;background:#000\">"
 "<div id=\"camerr\" style=\"display:none;padding:20px;background:#3a2323;border-radius:8px;color:#faa\">"
-"camera unavailable — check boot log for cam init error (pins probably need updating)"
+"camera unavailable — check boot log for cam init error"
 "</div>"
+"<script>document.getElementById('cam').src=location.protocol+'//'+location.hostname+':81/stream';</script>"
 
 "<h2>Drive (M1)</h2>"
 "<div class=\"row\">"
@@ -254,29 +255,52 @@ static esp_err_t on_led(httpd_req_t *req)
 
 esp_err_t http_control_start(void)
 {
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.server_port = 80;
-    cfg.max_uri_handlers = 8;
+    /* Two independent httpd instances: control on port 80 (small,
+     * responsive), MJPEG stream on port 81 (its own worker task loops
+     * forever pushing frames). Sharing one server made the stream
+     * monopolise the single worker and every /api POST queued
+     * behind it forever. */
+    httpd_config_t ctrl_cfg = HTTPD_DEFAULT_CONFIG();
+    ctrl_cfg.server_port      = 80;
+    ctrl_cfg.ctrl_port        = 32768;   /* default; keep explicit */
+    ctrl_cfg.max_uri_handlers = 8;
 
-    httpd_handle_t server = NULL;
-    esp_err_t err = httpd_start(&server, &cfg);
+    httpd_handle_t ctrl = NULL;
+    esp_err_t err = httpd_start(&ctrl, &ctrl_cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "httpd_start (ctrl) failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    static const httpd_uri_t uris[] = {
+    static const httpd_uri_t ctrl_uris[] = {
         { .uri = "/",           .method = HTTP_GET,  .handler = on_index },
-        { .uri = "/stream",     .method = HTTP_GET,  .handler = on_stream },
         { .uri = "/api/motor",  .method = HTTP_POST, .handler = on_motor },
         { .uri = "/api/stop",   .method = HTTP_POST, .handler = on_stop  },
         { .uri = "/api/servo",  .method = HTTP_POST, .handler = on_servo },
         { .uri = "/api/led",    .method = HTTP_POST, .handler = on_led   },
     };
-    for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); ++i) {
-        ESP_ERROR_CHECK(httpd_register_uri_handler(server, &uris[i]));
+    for (size_t i = 0; i < sizeof(ctrl_uris) / sizeof(ctrl_uris[0]); ++i) {
+        ESP_ERROR_CHECK(httpd_register_uri_handler(ctrl, &ctrl_uris[i]));
     }
 
-    ESP_LOGI(TAG, "HTTP control up on port 80 — connect to the AP and open http://192.168.4.1/");
+    httpd_config_t stream_cfg = HTTPD_DEFAULT_CONFIG();
+    stream_cfg.server_port      = 81;
+    stream_cfg.ctrl_port        = 32769;   /* must differ from the control server */
+    stream_cfg.max_uri_handlers = 2;
+    stream_cfg.max_open_sockets = 2;
+
+    httpd_handle_t stream = NULL;
+    err = httpd_start(&stream, &stream_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "httpd_start (stream :81) failed: %s — camera stream disabled",
+                 esp_err_to_name(err));
+    } else {
+        static const httpd_uri_t stream_uri = {
+            .uri = "/stream", .method = HTTP_GET, .handler = on_stream,
+        };
+        ESP_ERROR_CHECK(httpd_register_uri_handler(stream, &stream_uri));
+    }
+
+    ESP_LOGI(TAG, "HTTP control on :80, MJPEG stream on :81 — open http://192.168.4.1/");
     return ESP_OK;
 }
