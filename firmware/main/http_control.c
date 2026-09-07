@@ -54,7 +54,7 @@ static const char INDEX_HTML[] =
 "</div>"
 "<script>document.getElementById('cam').src=location.protocol+'//'+location.hostname+':81/stream';</script>"
 
-"<h2>Drive (M1)</h2>"
+"<h2>Drive</h2>"
 "<div class=\"row\">"
 "<button class=\"btn\" onclick=\"d(-1)\">&uarr;</button>"
 "<button class=\"btn stop\" onclick=\"stop()\">&#9632;</button>"
@@ -65,9 +65,9 @@ static const char INDEX_HTML[] =
 
 "<h2>Steer (servo)</h2>"
 "<div class=\"row\">"
-"<button class=\"btn\" onclick=\"v(45)\">&larr;</button>"
+"<button class=\"btn\" onclick=\"sL()\">&larr;</button>"
 "<button class=\"btn center\" onclick=\"v(90)\">&#8226;</button>"
-"<button class=\"btn\" onclick=\"v(135)\">&rarr;</button>"
+"<button class=\"btn\" onclick=\"sR()\">&rarr;</button>"
 "</div>"
 "<div><input id=\"sl\" type=\"range\" min=\"0\" max=\"180\" value=\"90\" oninput=\"v(this.value)\"></div>"
 "<div>angle: <span id=\"angle\">90</span>&deg;</div>"
@@ -78,18 +78,54 @@ static const char INDEX_HTML[] =
 "<button class=\"btn\" style=\"width:auto;height:auto;font-size:1em;padding:8px 24px\" onclick=\"c('#000000')\">off</button>"
 "</div>"
 
+"<button class=\"btn\" style=\"width:auto;height:auto;font-size:.9em;padding:8px 20px;margin-top:28px\" onclick=\"toggleS()\">&#9881; Settings</button>"
+"<div id=\"settings\" style=\"display:none;margin-top:16px;padding:16px;background:#232830;border-radius:12px;text-align:left;max-width:400px;margin-left:auto;margin-right:auto\">"
+"<h2 style=\"margin-top:0\">Settings</h2>"
+
+"<div style=\"margin:8px 0\"><label><input type=\"checkbox\" id=\"flipH\" onchange=\"flip()\"> Flip camera horizontally</label></div>"
+"<div style=\"margin:8px 0\"><label><input type=\"checkbox\" id=\"flipV\" onchange=\"flip()\"> Flip camera vertically</label></div>"
+
+"<div style=\"margin:16px 0 8px;color:#8ab;text-transform:uppercase;letter-spacing:.08em;font-size:.85em\">Motors</div>"
+"<div style=\"margin:8px 0\"><label><input type=\"checkbox\" id=\"m1en\" onchange=\"saveS()\" checked> M1 activated</label></div>"
+"<div style=\"margin:8px 0\"><label><input type=\"checkbox\" id=\"m2en\" onchange=\"saveS()\"> M2 activated</label></div>"
+
+"<div style=\"margin:16px 0 8px;color:#8ab;text-transform:uppercase;letter-spacing:.08em;font-size:.85em\">Servo presets</div>"
+"<div style=\"margin:8px 0;display:flex;align-items:center;gap:8px\"><label style=\"flex:1\">Left button angle</label>"
+"<input type=\"number\" id=\"svL\" value=\"45\" min=\"0\" max=\"180\" onchange=\"saveS()\" style=\"width:80px;padding:4px 8px;background:#334;color:#eee;border:0;border-radius:6px\"></div>"
+"<div style=\"margin:8px 0;display:flex;align-items:center;gap:8px\"><label style=\"flex:1\">Right button angle</label>"
+"<input type=\"number\" id=\"svR\" value=\"135\" min=\"0\" max=\"180\" onchange=\"saveS()\" style=\"width:80px;padding:4px 8px;background:#334;color:#eee;border:0;border-radius:6px\"></div>"
+
+"</div>"
+
 "<script>"
 "const p=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});"
-/* cur is the current motor direction (+1, -1, or 0). send() emits the
- * current dir × speed slider, so both the F/B buttons AND the speed
- * slider go through the same path. Speed changes while driving are
- * applied instantly by resending. */
+"const $=id=>document.getElementById(id);"
+/* Settings load: pull from localStorage, populate the inputs, and push
+ * camera flip to the ESP on page load so the sensor state matches. */
+"const S=JSON.parse(localStorage.getItem('rovS')||'{}');"
+"if(S.flipH!==undefined)$('flipH').checked=S.flipH;"
+"if(S.flipV!==undefined)$('flipV').checked=S.flipV;"
+"if(S.m1en!==undefined)$('m1en').checked=S.m1en;"
+"if(S.m2en!==undefined)$('m2en').checked=S.m2en;"
+"if(S.svL!==undefined)$('svL').value=S.svL;"
+"if(S.svR!==undefined)$('svR').value=S.svR;"
+"const saveS=()=>localStorage.setItem('rovS',JSON.stringify({flipH:$('flipH').checked,flipV:$('flipV').checked,m1en:$('m1en').checked,m2en:$('m2en').checked,svL:+$('svL').value,svR:+$('svR').value}));"
+"const flip=()=>{saveS();p('/api/cam/flip',{h:$('flipH').checked?1:0,v:$('flipV').checked?1:0});};"
+"flip();"   /* sync sensor to stored state at load */
+"const toggleS=()=>{const e=$('settings');e.style.display=e.style.display==='none'?'block':'none';};"
+
+/* cur is the current motor direction (+1, -1, or 0). d() and the speed
+ * slider both feed through send(), so speed edits mid-drive apply
+ * instantly. Which of {l,r} is populated depends on the M1/M2
+ * checkboxes in the settings panel. */
 "let cur=0;"
-"const send=()=>p('/api/motor',{l:cur*+document.getElementById('sp').value,r:0});"
+"const send=()=>{const s=cur*+$('sp').value;p('/api/motor',{l:$('m1en').checked?s:0,r:$('m2en').checked?s:0});};"
 "const d=dir=>{cur=dir;send();};"
 "const stop=()=>{cur=0;p('/api/stop',{});};"
-"const onSpeed=v=>{document.getElementById('spv').textContent=v;if(cur!==0)send();};"
-"const v=a=>{const n=+a;document.getElementById('sl').value=n;document.getElementById('angle').textContent=n;p('/api/servo',{angle:n});};"
+"const onSpeed=v=>{$('spv').textContent=v;if(cur!==0)send();};"
+"const v=a=>{const n=+a;$('sl').value=n;$('angle').textContent=n;p('/api/servo',{angle:n});};"
+"const sL=()=>v(+$('svL').value);"
+"const sR=()=>v(+$('svR').value);"
 "const c=h=>{"
 "const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);"
 "p('/api/led',{r:r,g:g,b:b});};"
@@ -228,6 +264,31 @@ static esp_err_t on_servo(httpd_req_t *req)
     return send_ok(req);
 }
 
+static esp_err_t on_cam_flip(httpd_req_t *req)
+{
+    char *body = read_body(req, 64);
+    if (!body) return send_err(req, "400 Bad Request", "body required");
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) return send_err(req, "400 Bad Request", "invalid JSON");
+    cJSON *h = cJSON_GetObjectItem(root, "h");
+    cJSON *v = cJSON_GetObjectItem(root, "v");
+    if (!cJSON_IsNumber(h) || !cJSON_IsNumber(v)) {
+        cJSON_Delete(root);
+        return send_err(req, "400 Bad Request", "h and v required");
+    }
+    int hi = (int)h->valuedouble ? 1 : 0;
+    int vi = (int)v->valuedouble ? 1 : 0;
+    cJSON_Delete(root);
+
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) return send_err(req, "503 Service Unavailable", "camera not initialised");
+    s->set_hmirror(s, hi);
+    s->set_vflip(s, vi);
+    ESP_LOGI(TAG, "cam flip h=%d v=%d", hi, vi);
+    return send_ok(req);
+}
+
 static esp_err_t on_led(httpd_req_t *req)
 {
     char *body = read_body(req, 128);
@@ -278,6 +339,7 @@ esp_err_t http_control_start(void)
         { .uri = "/api/stop",   .method = HTTP_POST, .handler = on_stop  },
         { .uri = "/api/servo",  .method = HTTP_POST, .handler = on_servo },
         { .uri = "/api/led",    .method = HTTP_POST, .handler = on_led   },
+        { .uri = "/api/cam/flip", .method = HTTP_POST, .handler = on_cam_flip },
     };
     for (size_t i = 0; i < sizeof(ctrl_uris) / sizeof(ctrl_uris[0]); ++i) {
         ESP_ERROR_CHECK(httpd_register_uri_handler(ctrl, &ctrl_uris[i]));
