@@ -58,13 +58,17 @@ esp_err_t camera_start(void)
         .pin_pclk        = PIN_CAM_PCLK,
 
         .xclk_freq_hz    = 20000000,          /* 20 MHz XCLK — OV5640 sweet spot */
-        .ledc_timer      = LEDC_TIMER_1,       /* codec uses TIMER_2 later, keep separate */
-        .ledc_channel    = LEDC_CHANNEL_2,
+        /* TIMER_0 / CHANNEL_0/1 are the motor LEDC path; TIMER_1 / CHANNEL_2
+         * is the servo (see main.c). TIMER_2 / CHANNEL_3 is reserved for
+         * ES8311 MCLK on the M3 branch. Camera lives on TIMER_3 / CHANNEL_5
+         * so nothing collides. */
+        .ledc_timer      = LEDC_TIMER_3,
+        .ledc_channel    = LEDC_CHANNEL_5,
 
         .pixel_format    = PIXFORMAT_JPEG,
         .frame_size      = FRAMESIZE_QVGA,     /* 320×240 — fast enough for streaming over Wi-Fi */
         .jpeg_quality    = 12,                 /* 0..63, lower = better */
-        .fb_count        = 2,                  /* 2 = smoother stream but needs PSRAM */
+        .fb_count        = 2,                  /* 2 = smoother stream, comfortably fits in the 8 MB PSRAM */
         .fb_location     = CAMERA_FB_IN_PSRAM,
         .grab_mode       = CAMERA_GRAB_LATEST,
     };

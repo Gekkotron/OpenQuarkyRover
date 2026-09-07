@@ -19,5 +19,16 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # Give app_main a comfortable stack. The REPL runs in its own task.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# PSRAM: NOT enabled in this M1 smoke test. The board is N16R8 (8 MB
-# octal PSRAM) — turn on in M2+ when the web UI + framebuffers need it.
+# PSRAM: enabled for the M2 web UI so the OV5640 camera can allocate its
+# JPEG framebuffers there instead of the constrained internal DRAM.
+# N16R8 = 16 MB flash + 8 MB octal PSRAM (AP Memory, AP_3v3, 85 °C rated).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_ESPPSRAM64=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# Larger single-app partition — 1 MB default overflows once esp32-camera
+# + jpeg + wifi_provisioning + esp_http_server are pulled in. This preset
+# gives the app 3 MB with the rest reserved for data / user filesystem.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
