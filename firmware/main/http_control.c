@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "cJSON.h"
+#include "esp_camera.h"
 
 static const char *TAG = "http_ctl";
 
@@ -44,6 +45,13 @@ static const char INDEX_HTML[] =
 "#angle{display:inline-block;min-width:3em;color:#8ab}"
 "</style></head><body>"
 "<h1>OpenQuarkyRover</h1>"
+
+"<img id=\"cam\" src=\"/stream\" alt=\"camera\" "
+"onerror=\"this.style.display='none';document.getElementById('camerr').style.display='block'\" "
+"style=\"max-width:100%;max-height:50vh;border-radius:12px;background:#000\">"
+"<div id=\"camerr\" style=\"display:none;padding:20px;background:#3a2323;border-radius:8px;color:#faa\">"
+"camera unavailable — check boot log for cam init error (pins probably need updating)"
+"</div>"
 
 "<h2>Drive (M1)</h2>"
 "<div class=\"row\">"
@@ -126,6 +134,41 @@ static int clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v)
 /* ------------------------------------------------------------------ *
  *  Handlers
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ *  MJPEG stream: multipart/x-mixed-replace. Browsers happily render
+ *  this in a plain <img> tag. Loops on esp_camera_fb_get() and pushes
+ *  each JPEG frame with a boundary + Content-Type + Content-Length.
+ *  Returns when the client disconnects (send fails).
+ * ------------------------------------------------------------------ */
+#define STREAM_BOUNDARY "--frame"
+#define STREAM_CONTENT_TYPE "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY
+
+static esp_err_t on_stream(httpd_req_t *req)
+{
+    esp_err_t r = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+    if (r != ESP_OK) return r;
+
+    char hdr[96];
+    while (true) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGW(TAG, "camera_fb_get failed");
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        int n = snprintf(hdr, sizeof hdr,
+                         "\r\n--" STREAM_BOUNDARY "\r\n"
+                         "Content-Type: image/jpeg\r\n"
+                         "Content-Length: %u\r\n\r\n",
+                         (unsigned)fb->len);
+        r = httpd_resp_send_chunk(req, hdr, n);
+        if (r == ESP_OK) r = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        esp_camera_fb_return(fb);
+        if (r != ESP_OK) break;   /* client disconnected */
+    }
+    return ESP_OK;
+}
 
 static esp_err_t on_index(httpd_req_t *req)
 {
@@ -224,6 +267,7 @@ esp_err_t http_control_start(void)
 
     static const httpd_uri_t uris[] = {
         { .uri = "/",           .method = HTTP_GET,  .handler = on_index },
+        { .uri = "/stream",     .method = HTTP_GET,  .handler = on_stream },
         { .uri = "/api/motor",  .method = HTTP_POST, .handler = on_motor },
         { .uri = "/api/stop",   .method = HTTP_POST, .handler = on_stop  },
         { .uri = "/api/servo",  .method = HTTP_POST, .handler = on_servo },

@@ -28,6 +28,7 @@
 #include "pins.h"
 #include "wifi_softap.h"
 #include "http_control.h"
+#include "camera.h"
 
 static const char *TAG = "M1";
 
@@ -2205,6 +2206,11 @@ void app_main(void)
 
     /* Boot indicator — green if LED pin happens to be right */
     led_set(0, 32, 0);
+
+    /* Camera bring-up before HTTP so /stream has a live sensor to pull
+     * from. Non-fatal: if pins are wrong the UI still loads and the
+     * <img src="/stream"> falls back to an "unavailable" banner. */
+    (void)camera_start();
 
     /* Wi-Fi soft-AP + HTTP control UI. Both are non-fatal; the REPL is
      * the fallback if Wi-Fi doesn't come up. */
