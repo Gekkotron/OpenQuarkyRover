@@ -14,6 +14,7 @@
 static const char *TAG = "audio_capture";
 
 static i2s_chan_handle_t s_rx_chan = NULL;
+static i2s_chan_handle_t s_tx_chan = NULL;   /* allocated but idle — see start_ex */
 static TaskHandle_t      s_task    = NULL;
 static QueueHandle_t     s_queue   = NULL;
 static volatile uint32_t s_dropped = 0;
@@ -57,11 +58,20 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
     s_dropped = 0;
 
     /* 8 DMA buffers × 320 frames × 4 B (32-bit slot) = 10.2 KB, 20 ms per
-     * buffer, 160 ms total headroom. Plenty for a core-1 task at prio 22. */
+     * buffer, 160 ms total headroom. Plenty for a core-1 task at prio 22.
+     *
+     * Allocate BOTH TX and RX handles so the peripheral runs in full-duplex
+     * mode. On ESP32-S3 the ESP-IDF I²S driver in RX-only master mode binds
+     * BCLK/WS to the RX-side signal indices (I2S0I_BCK=26, I2S0I_WS=27),
+     * whose clock generator behaves differently from the TX-side one and
+     * empirically stalled DMA on this codec. Stock firmware uses TX-side
+     * indices (live-captured OUT_SEL[46]=22, OUT_SEL[39]=24) — that only
+     * happens in full-duplex or TX-master mode. We init only RX in
+     * STD mode and leave TX idle; the shared clocks are what matters. */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num  = 8;
     chan_cfg.dma_frame_num = 320;
-    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_rx_chan), TAG, "new_channel");
+    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_tx_chan, &s_rx_chan), TAG, "new_channel");
 
     /* ES8311 outputs standard 16-bit I²S Philips, mono on the LEFT slot in
      * its stock ADC-only config (REG44=0x58 routes internal ADCL). No
@@ -105,6 +115,7 @@ esp_err_t audio_capture_start_ex(QueueHandle_t out_queue,
         i2s_channel_disable(s_rx_chan);
         i2s_del_channel(s_rx_chan);
         s_rx_chan = NULL;
+        if (s_tx_chan) { i2s_del_channel(s_tx_chan); s_tx_chan = NULL; }
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG, "capture started (16 kHz mono s16le, MCLK=I2S@GPIO%d "
@@ -134,6 +145,10 @@ esp_err_t audio_capture_stop(void)
         i2s_channel_disable(s_rx_chan);
         i2s_del_channel(s_rx_chan);
         s_rx_chan = NULL;
+    }
+    if (s_tx_chan) {
+        i2s_del_channel(s_tx_chan);
+        s_tx_chan = NULL;
     }
     s_queue = NULL;
     return ESP_OK;
