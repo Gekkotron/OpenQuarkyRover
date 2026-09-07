@@ -1849,7 +1849,7 @@ static int cmd_es_verify(int argc, char **argv)
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_1_BIT,
         .timer_num       = LEDC_TIMER_2,
-        .freq_hz         = 4000000,
+        .freq_hz         = 4096000,   /* 4.096 MHz = 16000 * 256 (mclk_multiple), matches ES8311 config */
         .clk_cfg         = LEDC_AUTO_CLK,
     };
     if (ledc_timer_config(&timer_cfg) != ESP_OK) {
@@ -1899,7 +1899,7 @@ static int cmd_es_init(int argc, char **argv)
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_1_BIT,
         .timer_num       = LEDC_TIMER_2,
-        .freq_hz         = 4000000,
+        .freq_hz         = 4096000,   /* 4.096 MHz = 16000 * 256 (mclk_multiple), matches ES8311 config */
         .clk_cfg         = LEDC_AUTO_CLK,
     };
     if (ledc_timer_config(&timer_cfg) != ESP_OK) {
@@ -1956,7 +1956,7 @@ static void es_repl_bootstrap(void)
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_1_BIT,
         .timer_num       = LEDC_TIMER_2,
-        .freq_hz         = 4000000,
+        .freq_hz         = 4096000,   /* 4.096 MHz = 16000 * 256 (mclk_multiple), matches ES8311 config */
         .clk_cfg         = LEDC_AUTO_CLK,
     };
     (void)ledc_timer_config(&mclk_timer);
@@ -2065,7 +2065,7 @@ static int cmd_voice_record(int argc, char **argv)
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_1_BIT,
         .timer_num       = LEDC_TIMER_2,
-        .freq_hz         = 4000000,
+        .freq_hz         = 4096000,   /* 4.096 MHz = 16000 * 256 (mclk_multiple), matches ES8311 config */
         .clk_cfg         = LEDC_AUTO_CLK,
     };
     (void)ledc_timer_config(&mclk_timer);
