@@ -1342,6 +1342,11 @@ void app_main(void)
      * LED/servo control. */
     bb_init(PIN_I2C_SDA, PIN_I2C_SCL);
     if (bb_tlc59108_init_seq(PIN_I2C_SDA, PIN_I2C_SCL)) {
+        /* Flip the same ready-flag cmd_bb_tlc_init sets — otherwise
+         * bb_motor_set() refuses every request until the REPL runs
+         * `bb-tlc-init` manually, which defeats the whole point of
+         * booting straight into the web UI. */
+        s_bb_ready = true;
         ESP_LOGI(TAG, "bit-bang TLC59108 online — motors ready");
     } else {
         ESP_LOGW(TAG, "bit-bang TLC59108 init failed — motors disabled until `bb-tlc-init` at REPL");
