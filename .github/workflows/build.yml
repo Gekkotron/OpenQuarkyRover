@@ -1,0 +1,52 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed for the release step
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out sources (with LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Build with ESP-IDF v5.3.2
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.2
+          target: esp32s3
+          path: 'firmware'
+
+      - name: Collect release artifacts
+        run: |
+          mkdir -p artifacts
+          cp firmware/build/openquarkyrover_m1_test.bin artifacts/
+          cp firmware/build/bootloader/bootloader.bin    artifacts/
+          cp firmware/build/partition_table/partition-table.bin artifacts/
+
+      - name: Upload build artifacts (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Attach artifacts to release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body_path: .github/RELEASE_NOTES.md
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
